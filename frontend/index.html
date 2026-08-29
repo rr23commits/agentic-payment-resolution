@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic Checkout</title>
+  <body>
+    <main>
+      <p><strong>Razorpay Test Mode</strong></p>
+      <h1>Your checkout</h1>
+      <section aria-labelledby="agent-heading">
+        <h2 id="agent-heading">Purchase with the agent</h2>
+        <form id="chat-form">
+          <label for="chat-request">What would you like to buy?</label>
+          <textarea id="chat-request" required rows="3" placeholder="Buy a book"></textarea>
+          <button type="submit">Ask agent</button>
+        </form>
+        <p id="chat-status" aria-live="polite"></p>
+        <ol id="chat-history"></ol>
+      </section>
+      <label>Checkout intent <input id="intent-id" autocomplete="off"></label>
+      <button id="load">Load checkout</button>
+      <p id="payment-status" aria-live="polite">Enter a checkout intent to view its status.</p>
+      <p id="mandate-outcome"></p>
+      <button id="launch" hidden>Launch Razorpay Test Mode checkout</button>
+      <button id="demo-timeout" hidden>Demo: simulate timeout/debit</button>
+      <p><a href="/operator">Operator view</a></p>
+    </main>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <script src="/checkout.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

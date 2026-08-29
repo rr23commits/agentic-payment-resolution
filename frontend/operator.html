@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator · Agentic Checkout</title>
+  <body>
+    <main>
+      <p><strong>Razorpay Test Mode · Operator</strong></p>
+      <h1>Payment resolution</h1>
+      <label>Intent <input id="operator-intent" autocomplete="off"></label>
+      <label>Operator token <input id="operator-token" type="password"></label>
+      <button id="operator-load">Load timeline</button>
+      <p id="operator-status" aria-live="polite"></p>
+      <button id="reconcile" hidden>Reconcile existing attempt</button>
+      <ol id="timeline"></ol>
+      <p><a href="/">Customer view</a></p>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
