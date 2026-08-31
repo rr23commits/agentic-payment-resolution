@@ -29,26 +29,40 @@ def _client_evidence(event: str) -> dict:
 
 
 def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
+    if not isinstance(evidence, dict):
+        raise ValueError("Payment evidence must be an object")
     cursor.execute(
-        "SELECT pa.*, ci.id AS intent_id FROM payment_attempts pa "
-        "JOIN checkout_intents ci ON ci.id = pa.intent_id WHERE pa.id = %s FOR UPDATE",
+        "SELECT ci.id AS intent_id FROM checkout_intents ci "
+        "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE pa.id = %s FOR UPDATE",
+        (attempt_id,),
+    )
+    intent = cursor.fetchone()
+    if not intent:
+        raise ValueError("Payment attempt does not exist")
+    cursor.execute(
+        "SELECT * FROM payment_attempts WHERE id = %s FOR UPDATE",
         (attempt_id,),
     )
     attempt = cursor.fetchone()
-    if not attempt:
-        raise ValueError("Payment attempt does not exist")
+    attempt["intent_id"] = intent["intent_id"]
 
     target, reason = _target_status(attempt, evidence)
     if target is None:
         return _exception(cursor, attempt, reason)
+    payment_id = evidence.get("payment_id")
+    if payment_id and attempt["razorpay_payment_id"] not in {None, payment_id}:
+        return _exception(cursor, attempt, "Provider payment reference conflicts with the attempt")
+    if payment_id:
+        cursor.execute(
+            "SELECT 1 FROM payment_attempts WHERE razorpay_payment_id = %s AND id <> %s",
+            (payment_id, attempt_id),
+        )
+        if cursor.fetchone():
+            return _exception(cursor, attempt, "Provider payment reference belongs to another attempt")
     if target == attempt["status"]:
         return {"attempt_id": attempt_id, "status": target, "idempotent": True}
     if not _allowed_transition(attempt["status"], target):
         return _exception(cursor, attempt, f"{attempt['status']} cannot transition to {target}")
-
-    payment_id = evidence.get("payment_id")
-    if payment_id and attempt["razorpay_payment_id"] not in {None, payment_id}:
-        return _exception(cursor, attempt, "Provider payment reference conflicts with the attempt")
     cursor.execute(
         "UPDATE payment_attempts SET status = %s, razorpay_payment_id = COALESCE(%s, razorpay_payment_id), "
         "last_authoritative_at = CURRENT_TIMESTAMP, resolution_reason = %s WHERE id = %s",
@@ -77,6 +91,20 @@ def reconcile_status(attempt_id: str) -> dict:
         attempt = cursor.fetchone()
     if not attempt:
         raise ValueError("Payment attempt does not exist")
+    if not attempt["razorpay_order_id"]:
+        with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                "SELECT id, intent_id, status FROM payment_attempts WHERE id = %s FOR UPDATE",
+                (attempt_id,),
+            )
+            current = cursor.fetchone()
+            _append_audit(
+                cursor, intent_id=current["intent_id"], attempt_id=attempt_id,
+                event_type="RECONCILIATION_CHECKED",
+                evidence_source="RAZORPAY_RECONCILIATION",
+                payload={"observed": False, "reason": "Provider order ID is not persisted"},
+            )
+            return {"attempt_id": attempt_id, "status": current["status"], "observed": False}
     payments = fetch_order_payments(attempt["razorpay_order_id"])
     payment = _matching_payment(payments, attempt["razorpay_payment_id"])
     if not payment:
@@ -124,7 +152,7 @@ def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
     if evidence.get("order_id") != attempt["razorpay_order_id"]:
         return None, "Provider order reference does not match the attempt"
     status = evidence.get("status") or evidence.get("event", "").removeprefix("payment.")
-    targets = {"captured": "CAPTURED", "failed": "FAILED", "reversed": "REVERSED", "refunded": "REFUNDED"}
+    targets = {"authorized": "CAPTURED", "captured": "CAPTURED", "failed": "FAILED", "reversed": "REVERSED", "refunded": "REFUNDED"}
     if status not in targets:
         return None, "Provider evidence has no final payment status"
     return targets[status], f"Razorpay {status}"

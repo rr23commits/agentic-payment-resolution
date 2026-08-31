@@ -57,6 +57,57 @@ class WebhookTests(unittest.TestCase):
             cursor.execute("SELECT type FROM audit_events WHERE intent_id = %s ORDER BY sequence", (checkout["intent_id"],))
             self.assertEqual([row[0] for row in cursor][-2:], ["WEBHOOK_RECEIVED", "ATTEMPT_RESOLVED"])
 
+    @patch("backend.checkout.create_order")
+    def test_webhook_arriving_during_order_creation_is_processed_once(self, create_order) -> None:
+        body = json.dumps({
+            "event": "payment.captured",
+            "payload": {"payment": {"entity": {"id": "pay_early", "order_id": "order_early"}}},
+        }, separators=(",", ":")).encode()
+        signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+
+        def create_and_deliver(_amount: int, _receipt: str) -> str:
+            result = ingest_webhook(body, signature, "event_early")
+            self.assertTrue(result["accepted"])
+            self.assertFalse(result["matched"])
+            return "order_early"
+
+        create_order.side_effect = create_and_deliver
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_early", customer_id="customer_webhook")
+        self.assertEqual(checkout["status"], "CAPTURED")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchone()[0], "CAPTURED")
+            cursor.execute("SELECT processed_at FROM webhook_events WHERE provider_event_id = 'event_early'")
+            self.assertIsNotNone(cursor.fetchone()[0])
+
+    @patch("backend.checkout.create_order", return_value="order_authorized")
+    def test_authorized_webhook_resolves_to_captured(self, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_authorized", customer_id="customer_webhook")
+        body, signature = self._event(checkout["order_id"], "payment.authorized")
+        self.assertTrue(ingest_webhook(body, signature, "event_authorized")["accepted"])
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchone()[0], "CAPTURED")
+
+    @patch("backend.checkout.create_order", return_value="order_conflict")
+    def test_conflicting_provider_references_are_audited_without_transition(self, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_conflict", customer_id="customer_webhook")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE payment_attempts SET razorpay_payment_id = 'pay_known' WHERE intent_id = %s",
+                (checkout["intent_id"],),
+            )
+        body, _ = self._event(checkout["order_id"])
+        body = body.replace(b"pay_webhook", b"pay_other")
+        signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+        result = ingest_webhook(body, signature, "event_conflict")
+        self.assertTrue(result["accepted"])
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchone()[0], "PENDING")
+            cursor.execute("SELECT type FROM audit_events WHERE intent_id = %s ORDER BY sequence", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchall()[-1][0], "RESOLUTION_EXCEPTION")
+
     def test_invalid_signature_changes_nothing(self) -> None:
         result = ingest_webhook(b'{"event":"payment.captured"}', "bad", "event_invalid")
         self.assertFalse(result["accepted"])

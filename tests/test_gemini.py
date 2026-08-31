@@ -102,6 +102,13 @@ class GeminiAdapterTests(unittest.TestCase):
         openrouter.assert_not_called()
 
     @patch("agent.gemini.openrouter_model", return_value={"tool": "search_catalogue", "arguments": {"query": "book"}})
+    def test_missing_gemini_key_falls_back(self, openrouter) -> None:
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}, clear=True):
+            result = gemini_first_model({"request": "Find", "instructions": "Use tools.", "tools": TOOLS})
+        self.assertEqual(result["tool"], "search_catalogue")
+        openrouter.assert_called_once()
+
+    @patch("agent.gemini.openrouter_model", return_value={"tool": "search_catalogue", "arguments": {"query": "book"}})
     @patch("agent.gemini.urlopen")
     def test_daily_quota_falls_back_without_retry(self, urlopen, openrouter) -> None:
         error = HTTPError("url", 429, "quota", {}, BytesIO(b'{"error":{"status":"RESOURCE_EXHAUSTED","message":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}}'))

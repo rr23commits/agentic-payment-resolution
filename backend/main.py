@@ -3,6 +3,7 @@
 import json
 import hmac
 import os
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -82,6 +83,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_client_timeout(self) -> None:
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < content_length <= 16_384:
+                raise ValueError("invalid request size")
             body = json.loads(self.rfile.read(content_length))
             result = record_client_timeout(body["intent_id"], body["customer_id"], body.get("event", "timeout"))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -126,6 +129,16 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
+        demo_delay = self.headers.get("X-Demo-Webhook-Delay", "")
+        if demo_delay:
+            try:
+                delay = float(demo_delay)
+                if not 0 <= delay <= 60:
+                    raise ValueError
+            except ValueError:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            time.sleep(delay)
         result = ingest_webhook(
             body,
             self.headers.get("X-Razorpay-Signature"),
@@ -139,8 +152,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < content_length <= 16_384:
+                raise ValueError("invalid request size")
             body = json.loads(self.rfile.read(content_length))
-            result = reconcile_status(body["intent_id"])
+            result = reconcile_status(body["attempt_id"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return

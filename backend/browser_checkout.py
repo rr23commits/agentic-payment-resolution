@@ -37,7 +37,7 @@ def record_client_payment_reference(
         cursor.execute(
             "SELECT ci.customer_id, pa.id AS attempt_id, pa.razorpay_order_id, "
             "pa.razorpay_payment_id, pa.status FROM checkout_intents ci "
-            "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE ci.id = %s",
+            "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE ci.id = %s FOR UPDATE",
             (intent_id,),
         )
         attempt = cursor.fetchone()

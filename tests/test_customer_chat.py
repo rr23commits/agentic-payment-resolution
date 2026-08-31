@@ -90,3 +90,33 @@ class CustomerChatEndpointTests(unittest.TestCase):
         response = connection.getresponse()
         self.assertEqual(response.status, 400)
         connection.close()
+
+    @patch("backend.main.reconcile_status", return_value={"status": "CAPTURED"})
+    def test_operator_reconcile_uses_attempt_id(self, reconcile) -> None:
+        with patch.dict("os.environ", {"OPERATOR_VIEW_TOKEN": "operator-secret"}):
+            connection = HTTPConnection(*self.server.server_address)
+            connection.request(
+                "POST", "/api/operator/reconcile", json.dumps({"attempt_id": "attempt_1"}),
+                {"Content-Type": "application/json", "X-Operator-Token": "operator-secret"},
+            )
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+        self.assertEqual(response.status, 200)
+        reconcile.assert_called_once_with("attempt_1")
+
+    @patch("backend.main.time.sleep")
+    @patch("backend.main.ingest_webhook", return_value={"accepted": True})
+    def test_demo_webhook_delay_happens_inside_processing_boundary(self, ingest, sleep) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            connection = HTTPConnection(*self.server.server_address)
+            connection.request(
+                "POST", "/webhooks/razorpay", "{}",
+                {"Content-Type": "application/json", "X-Demo-Webhook-Delay": "0.25"},
+            )
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+        self.assertEqual(response.status, 200)
+        sleep.assert_called_once_with(0.25)
+        ingest.assert_called_once()

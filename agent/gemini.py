@@ -39,7 +39,7 @@ def gemini_model(context: dict) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY must be set")
+        raise GeminiFallbackError("GEMINI_API_KEY must be set")
     request = Request(
         f"{GEMINI_URL}/{quote(model, safe='')}:generateContent?key={quote(api_key, safe='')}",
         data=json.dumps(_request_body(context, model), default=_json_default).encode(),

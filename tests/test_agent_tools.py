@@ -44,6 +44,9 @@ class AgentToolTests(unittest.TestCase):
         self.assertEqual(self.tools.get_audit_timeline(checkout["intent_id"])[-1]["type"], "RAZORPAY_ORDER_CREATED")
         self.assertFalse(tools_for("another_customer").get_payment_status(checkout["intent_id"])["found"])
 
+        self.tools.record_customer_message("Payment is being confirmed.", checkout["intent_id"])
+        self.assertEqual(self.tools.get_audit_timeline(checkout["intent_id"])[-1]["type"], "CUSTOMER_MESSAGE")
+
     def test_customer_scoping_blocks_other_customers_cart(self) -> None:
         cart = create_cart([{"product_id": "product_agent", "quantity": 1}], customer_id="other_customer")
         result = self.tools.validate_purchase(cart["cart_id"], "mandate_agent")

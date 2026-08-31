@@ -7,7 +7,11 @@ window.openRazorpayCheckout = function (checkout) {
   demoTimeout.onclick = () => fetch("/checkout/client-timeout", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({intent_id: checkout.intent_id, customer_id: checkout.customer_id, event: "timeout"}),
-  }).then(() => { status.textContent = "Payment is still being confirmed. Do not retry."; });
+  }).then((response) => {
+    status.textContent = response.ok
+      ? "Payment is still being confirmed. Do not retry."
+      : waiting;
+  }).catch(() => { status.textContent = waiting; });
 
   new window.Razorpay({
     key: checkout.razorpay_key_id,
@@ -22,7 +26,7 @@ window.openRazorpayCheckout = function (checkout) {
           razorpay_order_id: response.razorpay_order_id,
           razorpay_payment_id: response.razorpay_payment_id,
         }),
-      });
+      }).catch(() => {});
       status.textContent = waiting;
     },
   }).open();

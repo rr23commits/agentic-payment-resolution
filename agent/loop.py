@@ -54,6 +54,14 @@ def run_agent(
             entry["tool_call_id"] = action["_tool_call_id"]
         history.append(entry)
         if name == "respond_to_customer":
+            intent_id = next(
+                (item["result"]["intent_id"] for item in reversed(history)
+                 if isinstance(item.get("result"), dict) and item["result"].get("intent_id")),
+                None,
+            )
+            record_message = getattr(tools, "record_customer_message", None)
+            if callable(record_message):
+                record_message(result["message"], intent_id)
             return {"message": result["message"], "history": history}
     return {"message": "I could not complete this request safely.", "history": history}
 

@@ -7,8 +7,11 @@ from backend.catalogue import (
     search_catalogue,
     validate_purchase,
 )
-from backend.checkout import start_checkout
+from backend.checkout import _append_audit, start_checkout
 from backend.db import connect
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from uuid import uuid4
 
 
 def _parameters(properties: dict, required: list[str] | None = None) -> dict:
@@ -78,6 +81,33 @@ class AgentTools:
 
     def respond_to_customer(self, message: str) -> dict:
         return {"message": message}
+
+    def record_customer_message(self, message: str, intent_id: str | None = None) -> None:
+        with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            if intent_id:
+                cursor.execute(
+                    "SELECT pa.id FROM payment_attempts pa "
+                    "JOIN checkout_intents ci ON ci.id = pa.intent_id "
+                    "WHERE ci.id = %s AND ci.customer_id = %s",
+                    (intent_id, self.customer_id),
+                )
+                attempt = cursor.fetchone()
+                if attempt:
+                    _append_audit(
+                        cursor, intent_id=intent_id, attempt_id=attempt["id"],
+                        event_type="CUSTOMER_MESSAGE", evidence_source="AGENT",
+                        payload={"message": message},
+                    )
+                    return
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('audit:preintent', 0))")
+            cursor.execute("SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM audit_events WHERE intent_id IS NULL")
+            sequence = cursor.fetchone()["next_sequence"]
+            cursor.execute(
+                "INSERT INTO audit_events "
+                "(id, intent_id, attempt_id, sequence, type, actor, evidence_source, payload_json) "
+                "VALUES (%s, NULL, NULL, %s, 'CUSTOMER_MESSAGE', 'AGENT', 'AGENT', %s)",
+                (f"audit_{uuid4().hex}", sequence, Jsonb({"message": message})),
+            )
 
     def search_catalogue(self, query: str, category: str | None = None) -> list[dict]:
         return search_catalogue(query, category)

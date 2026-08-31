@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 import os
-import time
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -15,8 +14,6 @@ def replay_webhook(order_id: str, payment_id: str, status: str, delay: float, ur
         "event": f"payment.{status}",
         "payload": {"payment": {"entity": {"id": payment_id, "order_id": order_id}}},
     }, separators=(",", ":")).encode()
-    if delay:
-        time.sleep(delay)
     secret = os.environ["RAZORPAY_WEBHOOK_SECRET"].encode()
     request = Request(
         f"{url.rstrip('/')}/webhooks/razorpay", data=body,
@@ -24,6 +21,7 @@ def replay_webhook(order_id: str, payment_id: str, status: str, delay: float, ur
             "Content-Type": "application/json",
             "X-Razorpay-Signature": hmac.new(secret, body, hashlib.sha256).hexdigest(),
             "X-Razorpay-Event-Id": f"demo_{uuid4().hex}",
+            "X-Demo-Webhook-Delay": str(delay),
         }, method="POST",
     )
     with urlopen(request) as response:

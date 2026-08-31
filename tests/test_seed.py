@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timezone
 
 from backend.catalogue import get_mandate, search_catalogue
-from backend.db import migrate
+from backend.db import connect, migrate
 from backend.seed import main as seed
 
 
@@ -15,6 +15,8 @@ class DemoSeedTests(unittest.TestCase):
         migrate()
 
     def test_seeded_customer_gets_valid_mandate(self) -> None:
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("TRUNCATE webhook_events, audit_events, payment_attempts, checkout_intents, carts, mandates, products CASCADE")
         seed()
         seed()
         mandate = get_mandate("customer_demo")

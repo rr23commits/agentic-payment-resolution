@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS payment_attempts (
     resolution_reason TEXT
 );
 
+-- A local CREATED attempt is persisted before the provider call so an uncertain
+-- provider result cannot disappear and trigger a second external action.
+ALTER TABLE payment_attempts ALTER COLUMN razorpay_order_id DROP NOT NULL;
+
 DO $$
 BEGIN
     IF NOT EXISTS (

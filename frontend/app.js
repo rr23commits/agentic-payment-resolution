@@ -58,7 +58,7 @@ async function readOperator() {
   const result = await response.json();
   byId("operator-status").textContent = result.found ? `Attempt ${result.attempt_id}: ${result.status}` : "Intent not found.";
   byId("reconcile").hidden = !result.found;
-  byId("reconcile").onclick = () => reconcile(intentId, token);
+  byId("reconcile").onclick = () => reconcile(result.attempt_id, token);
   byId("timeline").replaceChildren(...result.timeline.map((event) => {
     const item = document.createElement("li");
     item.textContent = `${event.sequence}. ${event.type} (${event.evidence_source})`;
@@ -66,10 +66,10 @@ async function readOperator() {
   }));
 }
 
-async function reconcile(intentId, token) {
+async function reconcile(attemptId, token) {
   const response = await fetch("/api/operator/reconcile", {
     method: "POST", headers: {"Content-Type": "application/json", "X-Operator-Token": token},
-    body: JSON.stringify({intent_id: intentId}),
+    body: JSON.stringify({attempt_id: attemptId}),
   });
   byId("operator-status").textContent = response.ok ? "Reconciliation completed; reload the timeline." : "Reconciliation unavailable.";
 }

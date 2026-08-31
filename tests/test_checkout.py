@@ -1,6 +1,7 @@
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from psycopg.types.json import Jsonb
@@ -73,6 +74,48 @@ class CheckoutTests(unittest.TestCase):
                 (first["intent_id"],),
             )
             self.assertEqual([row[0] for row in cursor], [1, 2])
+
+    @patch("backend.checkout.create_order", return_value="order_concurrent")
+    def test_concurrent_requests_for_same_cart_create_one_order(self, create_order) -> None:
+        def checkout(number: int) -> dict:
+            return start_checkout(
+                self.cart["cart_id"], self.mandate_id, f"request_concurrent_{number}",
+                customer_id=self.customer_id,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(checkout, (1, 2)))
+        self.assertEqual(create_order.call_count, 1)
+        self.assertEqual(sum(result["allowed"] for result in results), 1)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM payment_attempts WHERE status = 'PENDING'")
+            self.assertEqual(cursor.fetchone()[0], 1)
+
+    @patch("backend.checkout.create_order", return_value="order_same_key")
+    def test_concurrent_replays_of_same_key_create_one_order(self, create_order) -> None:
+        def checkout() -> dict:
+            return start_checkout(
+                self.cart["cart_id"], self.mandate_id, "request_same_key",
+                customer_id=self.customer_id,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _unused: checkout(), (1, 2)))
+        self.assertEqual(create_order.call_count, 1)
+        self.assertEqual(len({result["intent_id"] for result in results}), 1)
+
+    @patch("backend.checkout.create_order", side_effect=RuntimeError("provider unavailable"))
+    def test_provider_failure_is_persisted_and_replay_does_not_retry(self, create_order) -> None:
+        first = start_checkout(
+            self.cart["cart_id"], self.mandate_id, "request_provider_failure", customer_id=self.customer_id
+        )
+        second = start_checkout(
+            self.cart["cart_id"], self.mandate_id, "request_provider_failure", customer_id=self.customer_id
+        )
+        self.assertEqual(first["status"], "AMBIGUOUS")
+        self.assertFalse(second["allowed"])
+        self.assertEqual(second["status"], "AMBIGUOUS")
+        self.assertEqual(create_order.call_count, 1)
 
     @patch("backend.checkout.create_order", return_value="order_test_append_only")
     def test_audit_events_are_contiguous_and_append_only(self, _create_order) -> None:
