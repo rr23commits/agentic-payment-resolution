@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS products (
     name TEXT NOT NULL,
     description TEXT NOT NULL,
     category TEXT NOT NULL,
-    price_paise BIGINT NOT NULL CHECK (price_paise >= 0),
+    price_paise BIGINT NOT NULL CHECK (price_paise BETWEEN 0 AND 9000000000000000000),
     stock INTEGER NOT NULL CHECK (stock >= 0),
     restricted BOOLEAN NOT NULL DEFAULT FALSE
 );
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS carts (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL,
     items_json JSONB NOT NULL,
-    total_paise BIGINT NOT NULL CHECK (total_paise >= 0),
+    total_paise BIGINT NOT NULL CHECK (total_paise BETWEEN 0 AND 9000000000000000000),
     status TEXT NOT NULL
 );
 
@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS payment_attempts (
     resolution_reason TEXT
 );
 
+ALTER TABLE payment_attempts ADD COLUMN IF NOT EXISTS stock_reserved BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- A local CREATED attempt is persisted before the provider call so an uncertain
 -- provider result cannot disappear and trigger a second external action.
 ALTER TABLE payment_attempts ALTER COLUMN razorpay_order_id DROP NOT NULL;
@@ -67,6 +69,11 @@ $$;
 CREATE UNIQUE INDEX IF NOT EXISTS payment_attempts_one_active_per_intent
     ON payment_attempts (intent_id)
     WHERE status IN ('PENDING', 'AMBIGUOUS');
+
+-- Customer-wide unresolved state is serialized by the transaction-scoped
+-- customer advisory lock in start_checkout; PostgreSQL partial indexes cannot
+-- express this invariant across payment_attempts and checkout_intents.
+DROP INDEX IF EXISTS checkout_intents_one_unresolved_per_customer;
 
 CREATE TABLE IF NOT EXISTS webhook_events (
     provider_event_id TEXT PRIMARY KEY,

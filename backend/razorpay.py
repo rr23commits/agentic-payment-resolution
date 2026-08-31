@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+from urllib.parse import quote
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -33,7 +34,7 @@ def create_order(amount_paise: int, receipt: str) -> str:
     try:
         with urlopen(request, timeout=10) as response:
             order_id = json.load(response).get("id")
-    except (HTTPError, URLError, TimeoutError) as error:
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, AttributeError, TypeError) as error:
         raise RazorpayError("Razorpay order creation failed") from error
     if not isinstance(order_id, str) or not order_id:
         raise RazorpayError("Razorpay returned no order ID")
@@ -48,7 +49,7 @@ def fetch_order_payments(order_id: str) -> list[dict]:
         raise RazorpayError("Razorpay Test Mode credentials are required")
     authorization = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
     request = Request(
-        f"https://api.razorpay.com/v1/orders/{order_id}/payments",
+        f"https://api.razorpay.com/v1/orders/{quote(order_id, safe='')}/payments",
         headers={"Authorization": f"Basic {authorization}"},
     )
     try:

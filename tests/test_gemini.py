@@ -91,6 +91,8 @@ class GeminiAdapterTests(unittest.TestCase):
             result = gemini_model({"request": "Find", "instructions": "Use tools.", "tools": TOOLS})
         self.assertEqual(result["tool"], "search_catalogue")
         self.assertIn("models/gemini-test:generateContent", urlopen.call_args.args[0].full_url)
+        self.assertNotIn("key=", urlopen.call_args.args[0].full_url)
+        self.assertEqual(urlopen.call_args.args[0].headers["X-goog-api-key"], "key")
 
     @patch("agent.gemini.openrouter_model")
     @patch("agent.gemini.urlopen")

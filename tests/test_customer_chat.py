@@ -7,12 +7,14 @@ from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 
 from backend.main import Handler, _CUSTOMER_CHAT_STATE
+import backend.main as main_module
 from agent.gemini import gemini_first_model
 
 
 class CustomerChatEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         _CUSTOMER_CHAT_STATE.clear()
+        main_module._RATE_LIMIT.clear()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -108,7 +110,7 @@ class CustomerChatEndpointTests(unittest.TestCase):
     @patch("backend.main.time.sleep")
     @patch("backend.main.ingest_webhook", return_value={"accepted": True})
     def test_demo_webhook_delay_happens_inside_processing_boundary(self, ingest, sleep) -> None:
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {"DEMO_MODE": "1"}, clear=True):
             connection = HTTPConnection(*self.server.server_address)
             connection.request(
                 "POST", "/webhooks/razorpay", "{}",
@@ -120,3 +122,49 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         sleep.assert_called_once_with(0.25)
         ingest.assert_called_once()
+
+    @patch("backend.main.time.sleep")
+    @patch("backend.main.ingest_webhook", return_value={"accepted": True})
+    def test_webhook_delay_header_is_ignored_outside_demo_mode(self, ingest, sleep) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            connection = HTTPConnection(*self.server.server_address)
+            connection.request("POST", "/webhooks/razorpay", "{}", {"X-Demo-Webhook-Delay": "10"})
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+        self.assertEqual(response.status, 200)
+        sleep.assert_not_called()
+
+    def test_payment_responses_include_security_headers(self) -> None:
+        connection = HTTPConnection(*self.server.server_address)
+        connection.request("GET", "/api/customer/transactions")
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertIn("script-src 'self' https://checkout.razorpay.com", response.getheader("Content-Security-Policy"))
+        self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+
+    @patch("backend.main.reconcile_status", side_effect=RuntimeError("database bug"))
+    def test_unexpected_reconcile_error_returns_internal_server_error(self, _reconcile) -> None:
+        with patch.dict("os.environ", {"OPERATOR_VIEW_TOKEN": "operator-secret"}):
+            connection = HTTPConnection(*self.server.server_address)
+            connection.request("POST", "/api/operator/reconcile", json.dumps({"attempt_id": "attempt_1"}), {"X-Operator-Token": "operator-secret"})
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+        self.assertEqual(response.status, 500)
+
+    def test_post_requests_are_rate_limited_per_client_and_path(self) -> None:
+        with patch.object(main_module, "_RATE_LIMIT_MAX", 1):
+            connection = HTTPConnection(*self.server.server_address)
+            connection.request("POST", "/api/customer/chat", json.dumps({}))
+            first = connection.getresponse(); first.read()
+            connection.close()
+            connection = HTTPConnection(*self.server.server_address)
+            connection.request("POST", "/api/customer/chat", json.dumps({}))
+            second = connection.getresponse(); second.read()
+            connection.close()
+        self.assertEqual(first.status, 400)
+        self.assertEqual(second.status, 429)

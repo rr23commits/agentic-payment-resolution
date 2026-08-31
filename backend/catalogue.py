@@ -14,6 +14,10 @@ from psycopg.types.json import Jsonb
 from backend.db import connect
 
 
+MAX_ITEM_QUANTITY = 1000
+MAX_CART_TOTAL_PAISE = 9_000_000_000_000_000_000
+
+
 def search_catalogue(query: str, category: str | None = None) -> list[dict]:
     """Return product summaries matching a customer query."""
     filters = ["(name ILIKE %s OR description ILIKE %s)"]
@@ -23,8 +27,8 @@ def search_catalogue(query: str, category: str | None = None) -> list[dict]:
         values.append(category)
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
-            "SELECT id, name, description, category, price_paise, stock, restricted "
-            "FROM products WHERE " + " AND ".join(filters) + " ORDER BY name",
+            "SELECT id, name, description, category, price_paise "
+            "FROM products WHERE restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY name",
             values,
         )
         return list(cursor.fetchall())
@@ -33,7 +37,7 @@ def search_catalogue(query: str, category: str | None = None) -> list[dict]:
 def get_product_details(product_id: str) -> dict | None:
     """Return the current server-authoritative product record."""
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-        cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+        cursor.execute("SELECT id, name, description, category, price_paise FROM products WHERE id = %s AND restricted = FALSE", (product_id,))
         return cursor.fetchone()
 
 
@@ -49,6 +53,8 @@ def create_cart(items: list[dict], *, customer_id: str) -> dict:
         quantities[product_id] += quantity
     if not quantities:
         raise ValueError("A cart needs at least one item")
+    if any(quantity > MAX_ITEM_QUANTITY for quantity in quantities.values()):
+        raise ValueError(f"Quantity cannot exceed {MAX_ITEM_QUANTITY}")
 
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
@@ -71,6 +77,8 @@ def create_cart(items: list[dict], *, customer_id: str) -> dict:
             products[product_id]["price_paise"] * quantity
             for product_id, quantity in quantities.items()
         )
+        if total_paise > MAX_CART_TOTAL_PAISE:
+            raise ValueError("Cart total exceeds the supported maximum")
         cart_id = f"cart_{uuid4().hex}"
         cursor.execute(
             "INSERT INTO carts (id, customer_id, items_json, total_paise, status) "
@@ -192,6 +200,9 @@ def _validate_cart_and_mandate(cursor, cart: dict, mandate: dict, reasons: list[
     ):
         reasons.append("Cart items are invalid")
         return
+    if any(quantity > MAX_ITEM_QUANTITY for quantity in quantities.values()):
+        reasons.append(f"Quantity cannot exceed {MAX_ITEM_QUANTITY}")
+        return
 
     cursor.execute(
         "SELECT id, category, price_paise, stock, restricted FROM products WHERE id = ANY(%s)",
@@ -218,6 +229,8 @@ def _validate_cart_and_mandate(cursor, cart: dict, mandate: dict, reasons: list[
     )
     if current_total != cart["total_paise"]:
         reasons.append("Cart total is stale; recreate the cart")
+    if cart["total_paise"] < 0 or cart["total_paise"] > MAX_CART_TOTAL_PAISE:
+        reasons.append("Cart total is outside the supported range")
     if current_total > mandate["max_amount_paise"]:
         reasons.append(
             f"Cart total {current_total} paise exceeds mandate cap "
@@ -226,6 +239,7 @@ def _validate_cart_and_mandate(cursor, cart: dict, mandate: dict, reasons: list[
 
 
 def _append_validation_audit(cursor, result: dict) -> None:
+    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('audit:preintent', 0))")
     cursor.execute(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence "
         "FROM audit_events WHERE intent_id IS NULL"

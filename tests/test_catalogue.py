@@ -1,5 +1,6 @@
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
@@ -69,8 +70,13 @@ class CatalogueToolTests(unittest.TestCase):
         self.assertEqual(cart["total_paise"], 40000)
         self.assertTrue(validate_purchase(cart["cart_id"], mandate_id)["allowed"])
         self.assertEqual(get_mandate(self.customer_id)["id"], mandate_id)
-        self.assertEqual(len(search_catalogue("book", "books")), 1)
+        products = search_catalogue("book", "books")
+        self.assertEqual(len(products), 1)
+        self.assertNotIn("stock", products[0])
+        self.assertNotIn("restricted", products[0])
         self.assertEqual(get_product_details("product_book")["price_paise"], 40000)
+        self.assertEqual(search_catalogue("Locked"), [])
+        self.assertIsNone(get_product_details("product_locked"))
 
     def test_cap_category_expiry_and_signature_failures_are_audited(self) -> None:
         cart = create_cart(
@@ -94,6 +100,16 @@ class CatalogueToolTests(unittest.TestCase):
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM audit_events")
             self.assertEqual(cursor.fetchone()[0], audit_count + len(cases))
+
+    def test_concurrent_preintent_audits_have_unique_sequences(self) -> None:
+        mandate_id = self.add_mandate()
+        cart = create_cart([{"product_id": "product_book", "quantity": 1}], customer_id=self.customer_id)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _item: validate_purchase(cart["cart_id"], mandate_id), range(8)))
+        self.assertTrue(all(result["allowed"] for result in results))
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT sequence, COUNT(*) FROM audit_events WHERE intent_id IS NULL GROUP BY sequence HAVING COUNT(*) > 1")
+            self.assertEqual(cursor.fetchall(), [])
 
     def test_stock_failure_cannot_create_a_cart(self) -> None:
         with self.assertRaisesRegex(ValueError, "Insufficient stock"):

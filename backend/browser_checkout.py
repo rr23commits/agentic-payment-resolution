@@ -16,8 +16,9 @@ def record_client_timeout(intent_id: str, customer_id: str, event: str = "timeou
         raise ValueError("unsupported client event")
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
-            "SELECT ci.customer_id, pa.id AS attempt_id, pa.status FROM checkout_intents ci "
-            "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE ci.id = %s FOR UPDATE",
+            "SELECT pa.id AS attempt_id, pa.intent_id, pa.status, ci.customer_id "
+            "FROM payment_attempts pa JOIN checkout_intents ci ON ci.id = pa.intent_id "
+            "WHERE ci.id = %s FOR UPDATE OF pa",
             (intent_id,),
         )
         attempt = cursor.fetchone()
@@ -37,7 +38,7 @@ def record_client_payment_reference(
         cursor.execute(
             "SELECT ci.customer_id, pa.id AS attempt_id, pa.razorpay_order_id, "
             "pa.razorpay_payment_id, pa.status FROM checkout_intents ci "
-            "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE ci.id = %s FOR UPDATE",
+            "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE ci.id = %s FOR UPDATE OF pa",
             (intent_id,),
         )
         attempt = cursor.fetchone()
@@ -58,29 +59,24 @@ def record_client_payment_reference(
                 payload={"razorpay_order_id": razorpay_order_id},
             )
             return {"accepted": False, "message": WAITING_MESSAGE}
-        if attempt["razorpay_payment_id"] == razorpay_payment_id:
-            return {"accepted": True, "idempotent": True, "message": WAITING_MESSAGE}
-        if attempt["razorpay_payment_id"]:
-            _append_audit(
-                cursor,
-                intent_id=intent_id,
-                attempt_id=attempt["attempt_id"],
-                event_type="CLIENT_REPORT_REJECTED",
-                evidence_source="CLIENT_REPORTED",
-                payload={"razorpay_order_id": razorpay_order_id},
+        idempotent = attempt["razorpay_payment_id"] == razorpay_payment_id
+        if not idempotent:
+            cursor.execute(
+                "SELECT 1 FROM audit_events WHERE intent_id = %s AND type = 'CLIENT_REPORTED' "
+                "AND payload_json->>'client_payment_id' = %s",
+                (intent_id, razorpay_payment_id),
             )
-            return {"accepted": False, "message": WAITING_MESSAGE}
-
-        cursor.execute(
-            "UPDATE payment_attempts SET razorpay_payment_id = %s WHERE id = %s",
-            (razorpay_payment_id, attempt["attempt_id"]),
-        )
+            idempotent = cursor.fetchone() is not None
+        if not idempotent and not attempt["razorpay_payment_id"]:
+            cursor.execute("UPDATE payment_attempts SET razorpay_payment_id = %s WHERE id = %s", (razorpay_payment_id, attempt["attempt_id"]))
         _append_audit(
             cursor,
             intent_id=intent_id,
             attempt_id=attempt["attempt_id"],
             event_type="CLIENT_REPORTED",
             evidence_source="CLIENT_REPORTED",
-            payload={"razorpay_order_id": razorpay_order_id},
+            payload={"razorpay_order_id": razorpay_order_id, "client_payment_id": razorpay_payment_id,
+                     "authoritative_payment_id": attempt["razorpay_payment_id"],
+                     "discrepancy": bool(attempt["razorpay_payment_id"] and not idempotent)},
         )
-    return {"accepted": True, "idempotent": False, "message": WAITING_MESSAGE}
+    return {"accepted": True, "idempotent": idempotent, "message": WAITING_MESSAGE}

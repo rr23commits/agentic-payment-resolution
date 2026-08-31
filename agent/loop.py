@@ -29,7 +29,7 @@ def run_agent(
                     "request": request,
                     "instructions": "Every turn must select exactly one available tool. Use the available tools to fulfill purchase requests. If a product is underspecified but searchable, search the catalogue first; do not ask the user for information the tools can provide. Use respond_to_customer only when the task is complete, blocked by a deterministic tool result, or genuinely requires user input. You never determine payment state. After PENDING or AMBIGUOUS, do not start another payment; observe the existing attempt. A rejected checkout is terminal for this request; explain the rejection and do not retry checkout.",
                     "tools": [tool for tool in TOOL_DEFINITIONS if tool["name"] in _allowed_tools(history)],
-                    "history": history,
+                    "history": _model_history(history),
                 }
             )
         except Exception as error:
@@ -74,6 +74,26 @@ def _safe_error_message(error: Exception) -> str:
     message = re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", message)
     message = re.sub(r"(?i)(api[_ -]?key|secret|token|password)\s*[:=]\s*\S+", r"\1=<redacted>", message)
     return message[:1000]
+
+
+def _model_history(history: list[dict]) -> list[dict]:
+    """Send only task data to providers; payment evidence and audit payloads stay local."""
+    allowed = {
+        "search_catalogue": lambda value: value if isinstance(value, list) else [],
+        "get_product_details": lambda value: value if isinstance(value, dict) else None,
+        "create_cart": lambda value: {key: value[key] for key in ("cart_id", "total_paise") if isinstance(value, dict) and key in value},
+        "get_mandate": lambda value: {key: value[key] for key in ("id", "max_amount_paise", "allowed_categories_json") if isinstance(value, dict) and key in value},
+        "validate_purchase": lambda value: {key: value[key] for key in ("allowed", "reasons", "cart_id", "mandate_id") if isinstance(value, dict) and key in value},
+        "start_checkout": lambda value: {key: value[key] for key in ("allowed", "intent_id", "status", "message", "reasons") if isinstance(value, dict) and key in value},
+        "get_payment_status": lambda value: {key: value[key] for key in ("found", "status", "message") if isinstance(value, dict) and key in value},
+        "get_audit_timeline": lambda value: [],
+    }
+    result = []
+    for entry in history:
+        item = {key: entry[key] for key in ("tool", "tool_call_id", "_assistant_message", "error") if key in entry}
+        item["result"] = allowed.get(entry.get("tool"), lambda _value: None)(entry.get("result"))
+        result.append(item)
+    return result
 
 
 def _validate_tool_arguments(name: str, arguments: dict) -> None:

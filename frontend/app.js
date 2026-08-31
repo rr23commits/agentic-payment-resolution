@@ -6,6 +6,14 @@ let transactions = [];
 const money = (paise) => paise == null ? "—" : `₹${(paise / 100).toFixed(2)}`;
 const shortId = (value) => value || "—";
 const finalStatuses = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED"]);
+const productRow = (item) => {
+  const row = document.createElement("div"); row.className = "cart-item";
+  const cover = document.createElement("span"); cover.className = "book-cover"; cover.setAttribute("aria-hidden", "true");
+  const info = document.createElement("span"); const name = document.createElement("strong"); name.textContent = item.name;
+  const category = document.createElement("small"); category.textContent = item.category; info.append(name, category);
+  const price = document.createElement("span"); price.className = "price"; price.textContent = money(item.price_paise * item.quantity);
+  row.append(cover, info, price); return row;
+};
 
 const statusCopy = {
   PENDING: ["Payment is being confirmed.", "We received your payment attempt and are waiting for authoritative confirmation. Do not retry."],
@@ -37,14 +45,11 @@ function renderCart(result) {
   byId("cart-items").replaceChildren(...items.map((item) => {
     const row = document.createElement("div");
     row.className = "cart-item";
-    row.innerHTML = `<span class="book-cover" aria-hidden="true"></span><span><strong>${item.name}</strong><small>${item.category}</small></span><span class="price">${money(item.price_paise * item.quantity)}</span>`;
-    return row;
+    return productRow(item);
   }));
   byId("remaining-cap").textContent = result.mandate_cap_paise == null ? "—" : money(result.mandate_cap_paise - result.cart_total_paise);
   const item = items[0];
-  byId("transaction-item").innerHTML = item
-    ? `<span class="book-cover" aria-hidden="true"></span><span><strong>${item.name}</strong><small>${item.category}</small></span><span class="price">${money(item.price_paise * item.quantity)}</span>`
-    : "";
+  byId("transaction-item").replaceChildren(...(item ? [productRow(item)] : []));
   byId("transaction-subtotal").textContent = money(result.cart_total_paise);
   byId("transaction-tax").textContent = money(result.tax_paise);
   byId("transaction-total").textContent = money(result.cart_total_paise + (result.tax_paise || 0));
@@ -102,7 +107,8 @@ function renderTimeline(events) {
   byId("processing-timeline").replaceChildren(...(events || []).map((event) => {
     const [label, description] = eventLabels[event.type] || [event.type, "Recorded in the payment audit trail."];
     const item = document.createElement("div"); item.className = event.type === "ATTEMPT_RESOLVED" ? "complete" : "recorded";
-    item.innerHTML = `<span>${event.type === "ATTEMPT_RESOLVED" ? "✓" : "•"}</span><div><strong>${label}</strong><small>${description}</small></div>`;
+    const icon = document.createElement("span"); icon.textContent = event.type === "ATTEMPT_RESOLVED" ? "✓" : "•";
+    const details = document.createElement("div"); const title = document.createElement("strong"); title.textContent = label; const copy = document.createElement("small"); copy.textContent = description; details.append(title, copy); item.append(icon, details);
     return item;
   }));
 }
@@ -146,10 +152,9 @@ function renderTransactionHistory() {
     const button = document.createElement("button");
     button.className = `transaction-choice ${transaction.intent_id === byId("intent-id").value ? "selected" : ""}`;
     button.type = "button";
-    button.innerHTML = `<strong></strong><span></span><small></small>`;
-    button.children[0].textContent = transaction.product;
-    button.children[1].textContent = `${money(transaction.amount_paise)} · ${transaction.status} · ${shortId(transaction.order_id || transaction.payment_id)}`;
-    button.children[2].textContent = new Date(transaction.created_at).toLocaleString();
+    const product = document.createElement("strong"); product.textContent = transaction.product;
+    const summary = document.createElement("span"); summary.textContent = `${money(transaction.amount_paise)} · ${transaction.status} · ${shortId(transaction.order_id || transaction.payment_id)}`;
+    const created = document.createElement("small"); created.textContent = new Date(transaction.created_at).toLocaleString(); button.append(product, summary, created);
     button.onclick = () => selectTransaction(transaction.intent_id);
     return button;
   }));
@@ -188,10 +193,10 @@ function renderOperator(result, token) {
   byId("operator-authoritative-at").textContent = result.last_authoritative_at ? new Date(result.last_authoritative_at).toLocaleString() : "Awaiting authority";
   const eventTypes = new Set((result.timeline || []).map((event) => event.type));
   const checks = [["Client payment ID received", Boolean(result.razorpay_payment_id)], ["Razorpay webhook received", eventTypes.has("WEBHOOK_RECEIVED")], ["Webhook signature verified", eventTypes.has("WEBHOOK_RECEIVED")], ["Event persisted", eventTypes.has("WEBHOOK_RECEIVED")], ["Payment matched", eventTypes.has("WEBHOOK_RECEIVED")], [`Authoritative state: ${result.status}`, eventTypes.has("ATTEMPT_RESOLVED")]];
-  byId("evidence-checklist").replaceChildren(...checks.map(([label, done]) => { const row = document.createElement("div"); row.className = done ? "complete" : ""; row.innerHTML = `<span>${done ? "✓" : "○"}</span>${label}`; return row; }));
+  byId("evidence-checklist").replaceChildren(...checks.map(([label, done]) => { const row = document.createElement("div"); row.className = done ? "complete" : ""; const icon = document.createElement("span"); icon.textContent = done ? "✓" : "○"; row.append(icon, document.createTextNode(label)); return row; }));
   byId("reconcile").disabled = ["CAPTURED", "FAILED", "REVERSED", "REFUNDED"].includes(result.status);
   byId("reconcile").onclick = () => reconcile(result.attempt_id, token);
-  byId("timeline").replaceChildren(...(result.timeline || []).map((event) => { const item = document.createElement("div"); const [label, description] = eventLabels[event.type] || [event.type, "Recorded in the payment audit trail."]; item.className = `audit-event ${["WEBHOOK_RECEIVED", "ATTEMPT_RESOLVED"].includes(event.type) ? "authoritative" : ""}`; item.innerHTML = `<time>${new Date(event.created_at).toLocaleTimeString()}</time><strong>${label}</strong><small>${event.type === "ATTEMPT_RESOLVED" ? `${description} State: ${event.detail?.status || result.status}.` : description}</small>`; return item; }));
+  byId("timeline").replaceChildren(...(result.timeline || []).map((event) => { const item = document.createElement("div"); const [label, description] = eventLabels[event.type] || [event.type, "Recorded in the payment audit trail."]; item.className = `audit-event ${["WEBHOOK_RECEIVED", "ATTEMPT_RESOLVED"].includes(event.type) ? "authoritative" : ""}`; const time = document.createElement("time"); time.textContent = new Date(event.created_at).toLocaleTimeString(); const title = document.createElement("strong"); title.textContent = label; const copy = document.createElement("small"); copy.textContent = event.type === "ATTEMPT_RESOLVED" ? `${description} State: ${event.detail?.status || result.status}.` : description; item.append(time, title, copy); return item; }));
 }
 
 async function readOperator() {

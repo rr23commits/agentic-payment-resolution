@@ -17,17 +17,15 @@ MESSAGES = {
 }
 
 
-def customer_intent(intent_id: str) -> dict:
+def customer_intent(intent_id: str, customer_id: str | None = None) -> dict:
     """Return only the customer-safe state and existing checkout launch data."""
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-        cursor.execute(
-            "SELECT ci.id, ci.customer_id, ci.mandate_id, ci.status, pa.razorpay_order_id, pa.razorpay_payment_id, "
-            "c.total_paise, c.items_json, m.max_amount_paise, m.merchant_id FROM checkout_intents ci "
-            "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-            "JOIN carts c ON c.id = ci.cart_id JOIN mandates m ON m.id = ci.mandate_id "
-            "WHERE ci.id = %s",
-            (intent_id,),
-        )
+        query = "SELECT ci.id, ci.customer_id, ci.mandate_id, ci.status, pa.razorpay_order_id, pa.razorpay_payment_id, c.total_paise, c.items_json, m.max_amount_paise, m.merchant_id FROM checkout_intents ci JOIN payment_attempts pa ON pa.intent_id = ci.id JOIN carts c ON c.id = ci.cart_id JOIN mandates m ON m.id = ci.mandate_id WHERE ci.id = %s"
+        values = (intent_id,)
+        if customer_id is not None:
+            query += " AND ci.customer_id = %s"
+            values += (customer_id,)
+        cursor.execute(query, values)
         intent = cursor.fetchone()
         items = intent["items_json"] if intent else []
         products = {}

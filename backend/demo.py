@@ -21,7 +21,7 @@ def replay_webhook(order_id: str, payment_id: str, status: str, delay: float, ur
             "Content-Type": "application/json",
             "X-Razorpay-Signature": hmac.new(secret, body, hashlib.sha256).hexdigest(),
             "X-Razorpay-Event-Id": f"demo_{uuid4().hex}",
-            "X-Demo-Webhook-Delay": str(delay),
+            **({"X-Demo-Webhook-Delay": str(delay)} if os.environ.get("DEMO_MODE") == "1" else {}),
         }, method="POST",
     )
     with urlopen(request) as response:

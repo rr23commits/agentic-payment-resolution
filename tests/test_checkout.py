@@ -7,9 +7,11 @@ from unittest.mock import patch
 from psycopg.types.json import Jsonb
 
 from backend.catalogue import create_cart, mandate_token, validate_purchase
-from backend.browser_checkout import WAITING_MESSAGE, record_client_payment_reference
+from backend.browser_checkout import WAITING_MESSAGE, record_client_payment_reference, record_client_timeout
+from backend.resolver import _client_evidence, resolve_attempt
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
+from backend.razorpay import RazorpayError
 
 
 @unittest.skipUnless(os.environ.get("DATABASE_URL"), "DATABASE_URL is not set")
@@ -104,7 +106,37 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(create_order.call_count, 1)
         self.assertEqual(len({result["intent_id"] for result in results}), 1)
 
-    @patch("backend.checkout.create_order", side_effect=RuntimeError("provider unavailable"))
+    @patch("backend.checkout.create_order", return_value="order_customer_wide")
+    def test_unresolved_attempt_blocks_different_cart_for_same_customer(self, create_order) -> None:
+        second_cart = create_cart([{"product_id": "product_checkout", "quantity": 1}], customer_id=self.customer_id)
+        first = start_checkout(self.cart["cart_id"], self.mandate_id, "request_cart_a", customer_id=self.customer_id)
+        second = start_checkout(second_cart["cart_id"], self.mandate_id, "request_cart_b", customer_id=self.customer_id)
+        self.assertTrue(first["allowed"])
+        self.assertFalse(second["allowed"])
+        self.assertEqual(create_order.call_count, 1)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM payment_attempts")
+            self.assertEqual(cursor.fetchone()[0], 1)
+
+    @patch("backend.checkout.create_order", return_value="order_lock_order")
+    def test_checkout_and_resolver_paths_complete_without_lock_order_deadlock(self, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], self.mandate_id, "request_lock_order", customer_id=self.customer_id)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            attempt_id = cursor.fetchone()[0]
+
+        def checkout_again() -> dict:
+            return start_checkout(self.cart["cart_id"], self.mandate_id, "request_lock_order_again", customer_id=self.customer_id)
+
+        def resolve_timeout() -> dict:
+            return resolve_attempt(attempt_id, _client_evidence("timeout"))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(checkout_again), executor.submit(resolve_timeout)]
+            results = [future.result(timeout=5) for future in futures]
+        self.assertTrue(any(result.get("status") == "AMBIGUOUS" for result in results))
+
+    @patch("backend.checkout.create_order", side_effect=RazorpayError("provider unavailable"))
     def test_provider_failure_is_persisted_and_replay_does_not_retry(self, create_order) -> None:
         first = start_checkout(
             self.cart["cart_id"], self.mandate_id, "request_provider_failure", customer_id=self.customer_id
@@ -116,6 +148,44 @@ class CheckoutTests(unittest.TestCase):
         self.assertFalse(second["allowed"])
         self.assertEqual(second["status"], "AMBIGUOUS")
         self.assertEqual(create_order.call_count, 1)
+
+    @patch("backend.checkout.create_order", side_effect=RuntimeError("programming error"))
+    def test_unexpected_provider_exception_is_not_classified_as_ambiguous(self, _create_order) -> None:
+        with self.assertRaisesRegex(RuntimeError, "programming error"):
+            start_checkout(self.cart["cart_id"], self.mandate_id, "request_unexpected_provider_error", customer_id=self.customer_id)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts")
+            self.assertEqual(cursor.fetchone()[0], "CREATED")
+
+    @patch("backend.checkout.create_order", return_value="order_stock_a")
+    def test_only_one_customer_can_checkout_the_last_item(self, create_order) -> None:
+        second_customer = "customer_stock_other"
+        second_mandate = "mandate_stock_other"
+        expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        token = mandate_token(customer_id=second_customer, merchant_id="merchant_demo", agent_id="agent_1", max_amount_paise=50000, allowed_categories=["books"], expires_at=expires_at)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE products SET stock = 1 WHERE id = 'product_checkout'")
+            cursor.execute("INSERT INTO mandates VALUES (%s, %s, 'merchant_demo', 'agent_1', 50000, %s, %s, %s)", (second_mandate, second_customer, Jsonb(["books"]), expires_at, token))
+        second_cart = create_cart([{"product_id": "product_checkout", "quantity": 1}], customer_id=second_customer)
+        carts = [(self.cart["cart_id"], self.mandate_id, self.customer_id), (second_cart["cart_id"], second_mandate, second_customer)]
+        def checkout(args: tuple[str, str, str]) -> dict:
+            cart_id, mandate_id, customer_id = args
+            return start_checkout(cart_id, mandate_id, f"stock_{customer_id}", customer_id=customer_id)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(checkout, carts))
+        self.assertEqual(sum(result["allowed"] for result in results), 1)
+        self.assertEqual(create_order.call_count, 1)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT stock FROM products WHERE id = 'product_checkout'")
+            self.assertEqual(cursor.fetchone()[0], 0)
+
+    def test_cart_rejects_excessive_quantities_and_totals(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Quantity"):
+            create_cart([{"product_id": "product_checkout", "quantity": 1001}], customer_id=self.customer_id)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE products SET price_paise = 9000000000000000000, stock = 2 WHERE id = 'product_checkout'")
+        with self.assertRaisesRegex(ValueError, "total"):
+            create_cart([{"product_id": "product_checkout", "quantity": 2}], customer_id=self.customer_id)
 
     @patch("backend.checkout.create_order", return_value="order_test_append_only")
     def test_audit_events_are_contiguous_and_append_only(self, _create_order) -> None:

@@ -6,9 +6,9 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from backend.catalogue import _validate_purchase
+from backend.catalogue import MAX_CART_TOTAL_PAISE, _append_validation_audit, _validate_purchase
 from backend.db import connect
-from backend.razorpay import create_order
+from backend.razorpay import RazorpayError, create_order
 
 
 def start_checkout(
@@ -57,27 +57,38 @@ def start_checkout(
         cursor.execute(
             "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
             "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-            "WHERE ci.customer_id = %s AND ci.cart_id = %s "
-            "AND pa.status <> 'FAILED'",
-            (customer_id, cart_id),
+            "WHERE ci.customer_id = %s AND pa.status IN ('CREATED', 'PENDING', 'AMBIGUOUS')",
+            (customer_id,),
         )
         active_attempt = cursor.fetchone()
+        if not active_attempt:
+            cursor.execute(
+                "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
+                "JOIN payment_attempts pa ON pa.intent_id = ci.id "
+                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status <> 'FAILED'",
+                (customer_id, cart_id),
+            )
+            active_attempt = cursor.fetchone()
         if active_attempt:
             _append_audit(
                 cursor,
                 intent_id=active_attempt["intent_id"],
                 attempt_id=active_attempt["attempt_id"],
                 event_type="CHECKOUT_BLOCKED",
-                payload={"reason": "Existing payment has not reached verified FAILED state"},
+                payload={"reason": "Customer already has an unresolved payment attempt"},
             )
             return {
                 "allowed": False,
-                "reasons": ["Existing payment has not reached verified FAILED state"],
+                "reasons": ["Customer already has an unresolved payment attempt; resolve it before checkout"],
                 "cart_id": cart_id,
             }
 
         validation = _validate_purchase(cursor, cart_id, mandate_id, customer_id)
         if not validation["allowed"]:
+            return validation
+        if not _reserve_cart_stock(cursor, cart_id):
+            validation = {**validation, "allowed": False, "reasons": ["Insufficient stock for this cart"]}
+            _append_validation_audit(cursor, validation)
             return validation
 
         intent_id = f"intent_{uuid4().hex}"
@@ -89,8 +100,8 @@ def start_checkout(
             (intent_id, customer_id, mandate_id, cart_id, client_request_id),
         )
         cursor.execute(
-            "INSERT INTO payment_attempts (id, intent_id, razorpay_order_id, status) "
-            "VALUES (%s, %s, NULL, 'CREATED')",
+            "INSERT INTO payment_attempts (id, intent_id, razorpay_order_id, status, stock_reserved) "
+            "VALUES (%s, %s, NULL, 'CREATED', TRUE)",
             (attempt_id, intent_id),
         )
         _append_audit(
@@ -103,7 +114,7 @@ def start_checkout(
         total_paise = _cart_total(cursor, cart_id)
     try:
         order_id = create_order(total_paise, intent_id)
-    except Exception as error:
+    except RazorpayError:
         with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 "UPDATE payment_attempts SET status = 'AMBIGUOUS', resolution_reason = %s "
@@ -172,7 +183,39 @@ def start_checkout(
 
 def _cart_total(cursor, cart_id: str) -> int:
     cursor.execute("SELECT total_paise FROM carts WHERE id = %s", (cart_id,))
-    return cursor.fetchone()["total_paise"]
+    total = cursor.fetchone()["total_paise"]
+    if not 0 <= total <= MAX_CART_TOTAL_PAISE:
+        raise ValueError("Cart total is outside the supported range")
+    return total
+
+
+def _reserve_cart_stock(cursor, cart_id: str) -> bool:
+    cursor.execute("SAVEPOINT reserve_stock")
+    cursor.execute("SELECT items_json FROM carts WHERE id = %s", (cart_id,))
+    items = cursor.fetchone()["items_json"]
+    quantities = {}
+    for item in items:
+        quantities[item["product_id"]] = quantities.get(item["product_id"], 0) + item["quantity"]
+    for product_id in sorted(quantities):
+        cursor.execute(
+            "UPDATE products SET stock = stock - %s WHERE id = %s AND stock >= %s RETURNING id",
+            (quantities[product_id], product_id, quantities[product_id]),
+        )
+        if not cursor.fetchone():
+            cursor.execute("ROLLBACK TO SAVEPOINT reserve_stock")
+            return False
+    cursor.execute("RELEASE SAVEPOINT reserve_stock")
+    return True
+
+
+def _release_cart_stock(cursor, cart_id: str) -> None:
+    cursor.execute("SELECT items_json FROM carts WHERE id = %s", (cart_id,))
+    items = cursor.fetchone()["items_json"]
+    quantities = {}
+    for item in items:
+        quantities[item["product_id"]] = quantities.get(item["product_id"], 0) + item["quantity"]
+    for product_id, quantity in quantities.items():
+        cursor.execute("UPDATE products SET stock = stock + %s WHERE id = %s", (quantity, product_id))
 
 
 def _append_audit(

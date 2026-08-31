@@ -4,6 +4,7 @@ import json
 import hmac
 import os
 import time
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +14,7 @@ from agent.loop import run_agent
 from agent.gemini import gemini_first_model
 from backend.browser_checkout import record_client_payment_reference, record_client_timeout
 from backend.resolver import reconcile_status
+from backend.razorpay import RazorpayError
 from backend.views import customer_intent, customer_transactions, operator_intent
 from backend.webhooks import ingest_webhook
 
@@ -20,13 +22,21 @@ from backend.webhooks import ingest_webhook
 FRONTEND = Path(__file__).parents[1] / "frontend"
 DEMO_CUSTOMER_ID = "customer_demo"
 _CUSTOMER_CHAT_STATE: dict[str, dict] = {}
+_RATE_LIMIT: dict[tuple[str, str], list[float]] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_MAX = 60
+_RATE_LIMIT_WINDOW = 60.0
+_CSP = "default-src 'self'; script-src 'self' https://checkout.razorpay.com; connect-src 'self' https://api.razorpay.com https://checkout.razorpay.com; style-src 'self'; img-src 'self' data:; frame-src https://checkout.razorpay.com https://api.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'"
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") and self._rate_limited(parsed.path):
+            self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many requests"})
+            return
         if parsed.path == "/api/customer/intent":
-            self._json(HTTPStatus.OK, customer_intent(_query(parsed.query, "intent_id")))
+            self._json(HTTPStatus.OK, customer_intent(_query(parsed.query, "intent_id"), DEMO_CUSTOMER_ID))
             return
         if parsed.path == "/api/customer/transactions":
             self._json(HTTPStatus.OK, customer_transactions(DEMO_CUSTOMER_ID))
@@ -53,6 +63,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_POST(self) -> None:
+        if self._rate_limited(urlparse(self.path).path):
+            self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many requests"})
+            return
         if self.path == "/api/customer/chat":
             self._handle_customer_chat()
             return
@@ -75,7 +88,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(content_length))
             result = record_client_payment_reference(
                 body["intent_id"],
-                body["customer_id"],
+                DEMO_CUSTOMER_ID,
                 body["razorpay_order_id"],
                 body["razorpay_payment_id"],
             )
@@ -90,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < content_length <= 16_384:
                 raise ValueError("invalid request size")
             body = json.loads(self.rfile.read(content_length))
-            result = record_client_timeout(body["intent_id"], body["customer_id"], body.get("event", "timeout"))
+            result = record_client_timeout(body["intent_id"], DEMO_CUSTOMER_ID, body.get("event", "timeout"))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
@@ -134,10 +147,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
         demo_delay = self.headers.get("X-Demo-Webhook-Delay", "")
-        if demo_delay:
+        if demo_delay and os.environ.get("DEMO_MODE") == "1":
             try:
                 delay = float(demo_delay)
-                if not 0 <= delay <= 60:
+                if not 0 <= delay <= 10:
                     raise ValueError
             except ValueError:
                 self.send_error(HTTPStatus.BAD_REQUEST)
@@ -163,8 +176,11 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
-        except RuntimeError:
+        except RazorpayError:
             self._json(HTTPStatus.BAD_GATEWAY, {"accepted": False, "message": "Reconciliation unavailable"})
+            return
+        except Exception:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"accepted": False, "message": "Internal server error"})
             return
         self._json(HTTPStatus.OK, result)
 
@@ -173,6 +189,17 @@ class Handler(BaseHTTPRequestHandler):
         supplied = self.headers.get("X-Operator-Token", "")
         return bool(token) and hmac.compare_digest(supplied, token)
 
+    def _rate_limited(self, path: str) -> bool:
+        now = time.monotonic()
+        key = (self.client_address[0], path)
+        with _RATE_LIMIT_LOCK:
+            timestamps = [stamp for stamp in _RATE_LIMIT.get(key, []) if now - stamp < _RATE_LIMIT_WINDOW]
+            limited = len(timestamps) >= _RATE_LIMIT_MAX
+            if not limited:
+                timestamps.append(now)
+            _RATE_LIMIT[key] = timestamps
+            return limited
+
     def _json(self, status: HTTPStatus, result: dict) -> None:
         encoded = json.dumps(result, default=str).encode()
         self.send_response(status)
@@ -180,6 +207,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def end_headers(self) -> None:
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if self.path.startswith(("/api/", "/checkout/", "/webhooks/")):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
 
 
 def _query(query: str, name: str) -> str:

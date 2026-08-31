@@ -6,7 +6,7 @@ window.openRazorpayCheckout = function (checkout) {
   demoTimeout.hidden = false;
   demoTimeout.onclick = () => fetch("/checkout/client-timeout", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({intent_id: checkout.intent_id, customer_id: checkout.customer_id, event: "timeout"}),
+    body: JSON.stringify({intent_id: checkout.intent_id, event: "timeout"}),
   }).then((response) => {
     status.textContent = response.ok
       ? "Payment is still being confirmed. Do not retry."
@@ -22,7 +22,6 @@ window.openRazorpayCheckout = function (checkout) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           intent_id: checkout.intent_id,
-          customer_id: checkout.customer_id,
           razorpay_order_id: response.razorpay_order_id,
           razorpay_payment_id: response.razorpay_payment_id,
         }),

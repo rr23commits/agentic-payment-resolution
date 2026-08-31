@@ -52,6 +52,7 @@ def ingest_webhook(body: bytes, signature: str | None, provider_event_id: str | 
 
         attempt = _find_attempt(cursor, order_id, payment_id)
         if attempt:
+            cursor.execute("SELECT id FROM payment_attempts WHERE id = %s FOR UPDATE", (attempt["id"],))
             _append_audit(
                 cursor,
                 intent_id=attempt["intent_id"],
@@ -64,6 +65,9 @@ def ingest_webhook(body: bytes, signature: str | None, provider_event_id: str | 
                 "RAZORPAY_WEBHOOK", event=payload.get("event"),
                 order_id=order_id, payment_id=payment_id,
             ))
+            _mark_processed(cursor, provider_event_id)
+        elif _references_contradict(cursor, order_id, payment_id):
+            _append_global_webhook_audit(cursor, provider_event_id, order_id, payment_id)
             _mark_processed(cursor, provider_event_id)
         elif not order_id:
             _mark_processed(cursor, provider_event_id)
@@ -84,7 +88,11 @@ def process_pending_webhooks(cursor, order_id: str) -> None:
         payment_order, payment_id = _references(payload)
         attempt = _find_attempt(cursor, payment_order, payment_id)
         if not attempt:
+            if _references_contradict(cursor, payment_order, payment_id):
+                _append_global_webhook_audit(cursor, event["provider_event_id"], payment_order, payment_id)
+                _mark_processed(cursor, event["provider_event_id"])
             continue
+        cursor.execute("SELECT id FROM payment_attempts WHERE id = %s FOR UPDATE", (attempt["id"],))
         _append_audit(
             cursor, intent_id=attempt["intent_id"], attempt_id=attempt["id"],
             event_type="WEBHOOK_RECEIVED", evidence_source="RAZORPAY_WEBHOOK",
@@ -131,4 +139,26 @@ def _find_attempt(cursor, order_id: str | None, payment_id: str | None) -> dict 
         by_payment = cursor.fetchone()
     else:
         by_payment = None
+    if by_order and by_payment and by_order["id"] != by_payment["id"]:
+        return None
     return by_order or by_payment
+
+
+def _references_contradict(cursor, order_id: str | None, payment_id: str | None) -> bool:
+    if not order_id or not payment_id:
+        return False
+    cursor.execute("SELECT id FROM payment_attempts WHERE razorpay_order_id = %s", (order_id,))
+    by_order = cursor.fetchone()
+    cursor.execute("SELECT id FROM payment_attempts WHERE razorpay_payment_id = %s", (payment_id,))
+    by_payment = cursor.fetchone()
+    return bool(by_order and by_payment and by_order["id"] != by_payment["id"])
+
+
+def _append_global_webhook_audit(cursor, event_id: str, order_id: str | None, payment_id: str | None) -> None:
+    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('audit:preintent', 0))")
+    cursor.execute("SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM audit_events WHERE intent_id IS NULL")
+    cursor.execute(
+        "INSERT INTO audit_events (id, intent_id, attempt_id, sequence, type, actor, evidence_source, payload_json) "
+        "VALUES (%s, NULL, NULL, %s, 'WEBHOOK_CONTRADICTION', 'SERVER', 'RAZORPAY_WEBHOOK', %s)",
+        (f"audit_{event_id}", cursor.fetchone()["next_sequence"], Jsonb({"provider_event_id": event_id, "order_id": order_id, "payment_id": payment_id, "reason": "Order and payment references belong to different attempts"})),
+    )

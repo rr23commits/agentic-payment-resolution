@@ -41,9 +41,9 @@ def gemini_model(context: dict) -> dict:
     if not api_key:
         raise GeminiFallbackError("GEMINI_API_KEY must be set")
     request = Request(
-        f"{GEMINI_URL}/{quote(model, safe='')}:generateContent?key={quote(api_key, safe='')}",
+        f"{GEMINI_URL}/{quote(model, safe='')}:generateContent",
         data=json.dumps(_request_body(context, model), default=_json_default).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
     for attempt in range(_MAX_ATTEMPTS):

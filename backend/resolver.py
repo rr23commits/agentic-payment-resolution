@@ -2,7 +2,7 @@
 
 from psycopg.rows import dict_row
 
-from backend.checkout import _append_audit
+from backend.checkout import _append_audit, _release_cart_stock
 from backend.db import connect
 from backend.razorpay import fetch_order_payments
 
@@ -32,26 +32,28 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
     if not isinstance(evidence, dict):
         raise ValueError("Payment evidence must be an object")
     cursor.execute(
-        "SELECT ci.id AS intent_id FROM checkout_intents ci "
-        "JOIN payment_attempts pa ON pa.intent_id = ci.id WHERE pa.id = %s FOR UPDATE",
-        (attempt_id,),
-    )
-    intent = cursor.fetchone()
-    if not intent:
-        raise ValueError("Payment attempt does not exist")
-    cursor.execute(
         "SELECT * FROM payment_attempts WHERE id = %s FOR UPDATE",
         (attempt_id,),
     )
     attempt = cursor.fetchone()
-    attempt["intent_id"] = intent["intent_id"]
+    if not attempt:
+        raise ValueError("Payment attempt does not exist")
+    cursor.execute("SELECT id FROM checkout_intents WHERE id = %s FOR UPDATE", (attempt["intent_id"],))
+    if not cursor.fetchone():
+        raise ValueError("Payment intent does not exist")
 
     target, reason = _target_status(attempt, evidence)
     if target is None:
         return _exception(cursor, attempt, reason)
     payment_id = evidence.get("payment_id")
     if payment_id and attempt["razorpay_payment_id"] not in {None, payment_id}:
-        return _exception(cursor, attempt, "Provider payment reference conflicts with the attempt")
+        cursor.execute(
+            "SELECT 1 FROM audit_events WHERE intent_id = %s AND type = 'CLIENT_REPORTED' "
+            "AND payload_json->>'client_payment_id' = %s",
+            (attempt["intent_id"], attempt["razorpay_payment_id"]),
+        )
+        if not cursor.fetchone():
+            return _exception(cursor, attempt, "Provider payment reference conflicts with the attempt")
     if payment_id:
         cursor.execute(
             "SELECT 1 FROM payment_attempts WHERE razorpay_payment_id = %s AND id <> %s",
@@ -63,8 +65,11 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
         return {"attempt_id": attempt_id, "status": target, "idempotent": True}
     if not _allowed_transition(attempt["status"], target):
         return _exception(cursor, attempt, f"{attempt['status']} cannot transition to {target}")
+    if target == "FAILED" and attempt.get("stock_reserved"):
+        cursor.execute("SELECT cart_id FROM checkout_intents WHERE id = %s", (attempt["intent_id"],))
+        _release_cart_stock(cursor, cursor.fetchone()["cart_id"])
     cursor.execute(
-        "UPDATE payment_attempts SET status = %s, razorpay_payment_id = COALESCE(%s, razorpay_payment_id), "
+        "UPDATE payment_attempts SET status = %s, stock_reserved = FALSE, razorpay_payment_id = COALESCE(%s, razorpay_payment_id), "
         "last_authoritative_at = CURRENT_TIMESTAMP, resolution_reason = %s WHERE id = %s",
         (target, payment_id, reason, attempt_id),
     )
@@ -83,54 +88,37 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
 def reconcile_status(attempt_id: str) -> dict:
     """Read Razorpay's current payment status without creating or retrying an order."""
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-        cursor.execute(
-            "SELECT id, intent_id, razorpay_order_id, razorpay_payment_id, status "
-            "FROM payment_attempts WHERE id = %s",
-            (attempt_id,),
-        )
+        cursor.execute("SELECT razorpay_order_id FROM payment_attempts WHERE id = %s", (attempt_id,))
         attempt = cursor.fetchone()
     if not attempt:
         raise ValueError("Payment attempt does not exist")
     if not attempt["razorpay_order_id"]:
-        with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                "SELECT id, intent_id, status FROM payment_attempts WHERE id = %s FOR UPDATE",
-                (attempt_id,),
-            )
-            current = cursor.fetchone()
-            _append_audit(
-                cursor, intent_id=current["intent_id"], attempt_id=attempt_id,
-                event_type="RECONCILIATION_CHECKED",
-                evidence_source="RAZORPAY_RECONCILIATION",
-                payload={"observed": False, "reason": "Provider order ID is not persisted"},
-            )
-            return {"attempt_id": attempt_id, "status": current["status"], "observed": False}
-    payments = fetch_order_payments(attempt["razorpay_order_id"])
-    payment = _matching_payment(payments, attempt["razorpay_payment_id"])
-    if not payment:
-        with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                "SELECT id, intent_id, status FROM payment_attempts WHERE id = %s FOR UPDATE",
-                (attempt_id,),
-            )
-            current = cursor.fetchone()
+        payments = []
+    else:
+        payments = fetch_order_payments(attempt["razorpay_order_id"])
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute("SELECT * FROM payment_attempts WHERE id = %s FOR UPDATE", (attempt_id,))
+        current = cursor.fetchone()
+        cursor.execute("SELECT id FROM checkout_intents WHERE id = %s FOR UPDATE", (current["intent_id"],))
+        if current["status"] in FINAL_STATUSES:
+            return {"attempt_id": attempt_id, "status": current["status"], "idempotent": True}
+        payment = _matching_payment(payments, current["razorpay_payment_id"])
+        if not payment:
             _append_audit(
                 cursor,
                 intent_id=current["intent_id"], attempt_id=attempt_id,
                 event_type="RECONCILIATION_CHECKED",
                 evidence_source="RAZORPAY_RECONCILIATION",
-                payload={"observed": False},
+                payload={"observed": False, **({"reason": "Provider order ID is not persisted"} if not current["razorpay_order_id"] else {})},
             )
             return {"attempt_id": attempt_id, "status": current["status"], "observed": False}
-
-    evidence = _provider_evidence(
-        "RAZORPAY_RECONCILIATION", status=payment.get("status"),
-        order_id=payment.get("order_id"), payment_id=payment.get("id"),
-    )
-    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        evidence = _provider_evidence(
+            "RAZORPAY_RECONCILIATION", status=payment.get("status"),
+            order_id=payment.get("order_id"), payment_id=payment.get("id"),
+        )
         _append_audit(
             cursor,
-            intent_id=attempt["intent_id"],
+            intent_id=current["intent_id"],
             attempt_id=attempt_id,
             event_type="RECONCILIATION_CHECKED",
             evidence_source="RAZORPAY_RECONCILIATION",

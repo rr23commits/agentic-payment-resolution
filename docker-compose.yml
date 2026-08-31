@@ -4,9 +4,10 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-agentic_checkout}
       POSTGRES_USER: ${POSTGRES_USER:-agentic_checkout}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set; copy .env.example and replace the example value}
     ports:
-      - "5432:5432"
+      # The app runs on the host during local development; keep the port loopback-only.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

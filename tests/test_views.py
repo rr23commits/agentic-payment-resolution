@@ -43,3 +43,8 @@ class ViewTests(unittest.TestCase):
         self.assertEqual((operator["attempt_id"].startswith("attempt_"), operator["status"]), (True, "PENDING"))
         self.assertEqual(operator["timeline"][-1]["type"], "RAZORPAY_ORDER_CREATED")
         self.assertNotIn("razorpay_order_id", operator["timeline"][-1]["detail"])
+
+    @patch("backend.checkout.create_order", return_value="order_view_owner")
+    def test_customer_projection_rejects_other_customer(self, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_view", "request_owner", customer_id="customer_view")
+        self.assertFalse(customer_intent(checkout["intent_id"], "customer_other")["found"])

@@ -2,14 +2,16 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from psycopg.types.json import Jsonb
 
 from backend.catalogue import create_cart, mandate_token
-from backend.browser_checkout import record_client_timeout
+from backend.browser_checkout import record_client_payment_reference, record_client_timeout
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
 from backend.resolver import _client_evidence, reconcile_status, resolve_attempt
@@ -88,6 +90,72 @@ class WebhookTests(unittest.TestCase):
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
             self.assertEqual(cursor.fetchone()[0], "CAPTURED")
+
+    @patch("backend.checkout.create_order", return_value="order_client_then_provider")
+    def test_provider_payment_replaces_arbitrary_client_reference(self, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_client_then_provider", customer_id="customer_webhook")
+        self.assertTrue(record_client_payment_reference(checkout["intent_id"], "customer_webhook", checkout["order_id"], "pay_attacker")["accepted"])
+        body, signature = self._event(checkout["order_id"])
+        ingest_webhook(body, signature, "event_client_then_provider")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status, razorpay_payment_id FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchone(), ("CAPTURED", "pay_webhook"))
+
+    @patch("backend.resolver.fetch_order_payments")
+    @patch("backend.checkout.create_order", return_value="order_reconcile_race")
+    def test_webhook_wins_reconciliation_race(self, _create_order, fetch_payments) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_reconcile_race", customer_id="customer_webhook")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            attempt_id = cursor.fetchone()[0]
+        fetched = threading.Event()
+        release = threading.Event()
+
+        def fetch_then_pause(order_id: str) -> list[dict]:
+            fetched.set()
+            self.assertTrue(release.wait(5))
+            return [{"id": "pay_reconcile", "order_id": order_id, "status": "failed"}]
+
+        fetch_payments.side_effect = fetch_then_pause
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(reconcile_status, attempt_id)
+            self.assertTrue(fetched.wait(5))
+            body, signature = self._event(checkout["order_id"])
+            self.assertEqual(ingest_webhook(body, signature, "event_reconcile_race")["accepted"], True)
+            release.set()
+            self.assertEqual(future.result(timeout=5)["status"], "CAPTURED")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts WHERE id = %s", (attempt_id,))
+            self.assertEqual(cursor.fetchone()[0], "CAPTURED")
+            cursor.execute("SELECT COUNT(*) FROM audit_events WHERE intent_id = %s AND type = 'RECONCILIATION_CHECKED'", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchone()[0], 0)
+
+    @patch("backend.checkout.create_order", side_effect=["order_mismatch_a", "order_mismatch_b"])
+    def test_webhook_order_and_payment_from_different_attempts_is_not_correlated(self, _create_order) -> None:
+        second_customer = "customer_webhook_other"
+        second_mandate = "mandate_webhook_other"
+        expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        token = mandate_token(customer_id=second_customer, merchant_id="merchant_demo", agent_id="agent_1", max_amount_paise=50000, allowed_categories=["books"], expires_at=expires_at)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE products SET stock = 2 WHERE id = 'product_webhook'")
+            cursor.execute("INSERT INTO mandates VALUES (%s, %s, 'merchant_demo', 'agent_1', 50000, %s, %s, %s)", (second_mandate, second_customer, Jsonb(["books"]), expires_at, token))
+        second_cart = create_cart([{"product_id": "product_webhook", "quantity": 1}], customer_id=second_customer)
+        first = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_mismatch_a", customer_id="customer_webhook")
+        second = start_checkout(second_cart["cart_id"], second_mandate, "request_mismatch_b", customer_id=second_customer)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE payment_attempts SET razorpay_payment_id = 'pay_mismatch_b' WHERE intent_id = %s", (second["intent_id"],))
+        body = json.dumps({"event": "payment.captured", "payload": {"payment": {"entity": {"id": "pay_mismatch_b", "order_id": first["order_id"]}}}}, separators=(",", ":")).encode()
+        signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+        result = ingest_webhook(body, signature, "event_mismatch")
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["matched"])
+        replay = ingest_webhook(body, signature, "event_mismatch")
+        self.assertTrue(replay["idempotent"])
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts ORDER BY id")
+            self.assertEqual({row[0] for row in cursor}, {"PENDING"})
+            cursor.execute("SELECT type FROM audit_events WHERE type = 'WEBHOOK_CONTRADICTION'")
+            self.assertEqual(cursor.fetchone()[0], "WEBHOOK_CONTRADICTION")
 
     @patch("backend.checkout.create_order", return_value="order_conflict")
     def test_conflicting_provider_references_are_audited_without_transition(self, _create_order) -> None:
