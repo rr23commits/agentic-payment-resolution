@@ -37,7 +37,7 @@ def customer_intent(intent_id: str, customer_id: str | None = None) -> dict:
                 "SELECT sequence, type, evidence_source, payload_json, created_at FROM audit_events "
                 "WHERE intent_id = %s ORDER BY sequence", (intent_id,)
             )
-            timeline = [_safe_event(event) for event in cursor]
+            timeline = [_safe_event(event) for event in cursor if event["type"] != "CLIENT_REPORT_REJECTED"]
     if not intent:
         return {"found": False}
     result = {
@@ -123,6 +123,28 @@ def operator_intent(intent_id: str) -> dict:
 def _safe_detail(payload: dict) -> dict:
     return {key: payload[key] for key in ("status", "reason", "reconciliation_required")
             if isinstance(payload, dict) and key in payload}
+
+
+def operator_transactions(query: str = "") -> dict:
+    """List persisted payment attempts for operator selection/search."""
+    query = (query or "").strip()
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            "SELECT ci.id AS intent_id, pa.id AS attempt_id, ci.status, ci.created_at, "
+            "pa.razorpay_order_id, pa.razorpay_payment_id, c.total_paise "
+            "FROM checkout_intents ci JOIN payment_attempts pa ON pa.intent_id = ci.id "
+            "JOIN carts c ON c.id = ci.cart_id "
+            "WHERE (%s = '' OR ci.id ILIKE %s OR pa.razorpay_order_id ILIKE %s "
+            "OR pa.razorpay_payment_id ILIKE %s) ORDER BY ci.created_at DESC",
+            (query, f"%{query}%", f"%{query}%", f"%{query}%"),
+        )
+        rows = cursor.fetchall()
+    return {"transactions": [
+        {"intent_id": row["intent_id"], "attempt_id": row["attempt_id"], "status": row["status"],
+         "created_at": row["created_at"], "order_id": row["razorpay_order_id"],
+         "payment_id": row["razorpay_payment_id"], "amount_paise": row["total_paise"]}
+        for row in rows
+    ]}
 
 
 def _safe_event(event: dict) -> dict:

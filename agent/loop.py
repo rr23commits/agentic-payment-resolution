@@ -27,7 +27,7 @@ def run_agent(
             action = model(
                 {
                     "request": request,
-                    "instructions": "Every turn must select exactly one available tool. Use the available tools to fulfill purchase requests. If a product is underspecified but searchable, search the catalogue first; do not ask the user for information the tools can provide. Use respond_to_customer only when the task is complete, blocked by a deterministic tool result, or genuinely requires user input. You never determine payment state. After PENDING or AMBIGUOUS, do not start another payment; observe the existing attempt. A rejected checkout is terminal for this request; explain the rejection and do not retry checkout.",
+                    "instructions": "Every turn must select exactly one available tool. Use the available tools to fulfill purchase requests. Treat numbers in requests as purchase quantities, never as catalogue-result counts; preserve each category quantity when creating a cart and say explicitly when stock cannot fulfill it. If a product is underspecified but searchable, search the catalogue first; for multiple requested categories, search each category separately with at most 4 results. Recommend products and wait for the customer-facing selection flow; never change a mandate. Use respond_to_customer only when the task is complete, blocked by a deterministic tool result, or genuinely requires user input. You never determine payment state. After PENDING or AMBIGUOUS, do not start another payment; observe the existing attempt. A rejected checkout is terminal for this request; explain the rejection and do not retry checkout.",
                     "tools": [tool for tool in TOOL_DEFINITIONS if tool["name"] in _allowed_tools(history)],
                     "history": _model_history(history),
                 }
@@ -83,7 +83,7 @@ def _model_history(history: list[dict]) -> list[dict]:
         "get_product_details": lambda value: value if isinstance(value, dict) else None,
         "create_cart": lambda value: {key: value[key] for key in ("cart_id", "total_paise") if isinstance(value, dict) and key in value},
         "get_mandate": lambda value: {key: value[key] for key in ("id", "max_amount_paise", "allowed_categories_json") if isinstance(value, dict) and key in value},
-        "validate_purchase": lambda value: {key: value[key] for key in ("allowed", "reasons", "cart_id", "mandate_id") if isinstance(value, dict) and key in value},
+        "validate_purchase": lambda value: {key: value[key] for key in ("allowed", "reasons", "cart_id", "mandate_id", "cart_total_paise", "mandate_cap_paise") if isinstance(value, dict) and key in value},
         "start_checkout": lambda value: {key: value[key] for key in ("allowed", "intent_id", "status", "message", "reasons") if isinstance(value, dict) and key in value},
         "get_payment_status": lambda value: {key: value[key] for key in ("found", "status", "message") if isinstance(value, dict) and key in value},
         "get_audit_timeline": lambda value: [],

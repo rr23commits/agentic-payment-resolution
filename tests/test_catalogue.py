@@ -9,8 +9,10 @@ from backend.catalogue import (
     create_cart,
     get_mandate,
     get_product_details,
+    increase_mandate,
     mandate_token,
     search_catalogue,
+    update_mandate,
     validate_purchase,
 )
 from backend.db import connect, migrate
@@ -137,3 +139,23 @@ class CatalogueToolTests(unittest.TestCase):
         )
         self.assertFalse(result["allowed"])
         self.assertIn("Mandate merchant does not match this merchant", result["reasons"])
+
+    def test_customer_mandate_revision_is_idempotent_and_old_revision_is_blocked(self) -> None:
+        mandate_id = self.add_mandate(cap=50000)
+        cart = create_cart([{"product_id": "product_book", "quantity": 1}], customer_id=self.customer_id)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=2)
+        first = update_mandate(self.customer_id, 100000, ["books", "pants"], expires_at, request_id="mandate-edit")
+        replay = update_mandate(self.customer_id, 1, ["games"], expires_at, request_id="mandate-edit")
+        self.assertEqual(first["id"], replay["id"])
+        self.assertEqual(get_mandate(self.customer_id)["id"], first["id"])
+        self.assertFalse(validate_purchase(cart["cart_id"], mandate_id)["allowed"])
+
+    def test_increase_is_server_rounded_explicit_and_idempotent(self) -> None:
+        mandate_id = self.add_mandate(cap=50000)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE products SET price_paise = 99800 WHERE id = 'product_book'")
+        cart = create_cart([{"product_id": "product_book", "quantity": 1}], customer_id=self.customer_id)
+        result = increase_mandate(self.customer_id, mandate_id, cart["cart_id"], request_id="mandate-increase")
+        replay = increase_mandate(self.customer_id, mandate_id, cart["cart_id"], request_id="mandate-increase")
+        self.assertEqual(result["max_amount_paise"], 100000)
+        self.assertEqual(result["id"], replay["id"])

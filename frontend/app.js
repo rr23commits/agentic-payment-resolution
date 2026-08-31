@@ -2,6 +2,10 @@ const byId = (id) => document.getElementById(id);
 let customerPoll;
 let customerData;
 let transactions = [];
+let mandate;
+let recommendations = [];
+let selectedProducts = [];
+let cartState;
 
 const money = (paise) => paise == null ? "—" : `₹${(paise / 100).toFixed(2)}`;
 const shortId = (value) => value || "—";
@@ -60,6 +64,65 @@ function renderCart(result) {
   byId("cap-fill").style.width = result.mandate_cap_paise ? `${Math.min(100, result.cart_total_paise / result.mandate_cap_paise * 100)}%` : "0%";
 }
 
+function renderRecommendations(products) {
+  recommendations = products;
+  const box = byId("recommendations");
+  box.classList.toggle("hidden", !products.length);
+  box.replaceChildren(...products.map((product) => {
+    const label = document.createElement("label"); label.className = "cart-item";
+    const input = document.createElement("input"); input.type = "checkbox"; input.value = product.id;
+    input.checked = selectedProducts.some((item) => item.id === product.id);
+    input.onchange = () => { selectedProducts = recommendations.filter((item) => box.querySelector(`input[value="${CSS.escape(item.id)}"]`)?.checked); byId("select-products").classList.toggle("hidden", !selectedProducts.length); };
+    const info = document.createElement("span"); const name = document.createElement("strong"); name.textContent = product.name; const category = document.createElement("small"); category.textContent = product.category; info.append(name, category);
+    const price = document.createElement("span"); price.className = "price"; price.textContent = money(product.price_paise); label.append(input, info, price); return label;
+  }));
+  byId("select-products").classList.toggle("hidden", !products.length || !selectedProducts.length);
+}
+
+async function saveMandate(event) {
+  event.preventDefault();
+  const categories = [...document.querySelectorAll("input[name=category]:checked")].map((input) => input.value);
+  const response = await fetch("/api/customer/mandate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+    request_id: crypto.randomUUID(), max_amount_paise: Math.round(Number(byId("max-limit").value) * 100), allowed_categories: categories,
+    expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+  })});
+  byId("mandate-status").textContent = response.ok ? "Mandate saved." : "Could not save mandate.";
+  if (response.ok) { mandate = await response.json(); byId("chat-submit").disabled = false; }
+}
+
+async function reviewProducts() {
+  if (!selectedProducts.length || !mandate) return;
+  const response = await fetch("/api/customer/cart", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+    mandate_id: mandate.id, items: selectedProducts.map(({id}) => ({product_id: id, quantity: 1})),
+  })});
+  cartState = await response.json();
+  byId("cart-card").classList.remove("hidden");
+  byId("cart-status").textContent = cartState.allowed ? "Within your mandate. Checkout is ready." : (cartState.reasons || []).join(" ");
+  const increase = byId("increase-mandate");
+  if (!cartState.allowed && cartState.cart_total_paise > cartState.mandate_cap_paise) {
+    const suggested = Math.ceil(cartState.cart_total_paise / 10000) * 10000;
+    increase.textContent = `Increase mandate to ${money(suggested)}`; increase.classList.remove("hidden");
+    increase.onclick = () => increaseMandate();
+  } else increase.classList.add("hidden");
+  byId("cart-items").replaceChildren(...selectedProducts.map((product) => productRow({...product, quantity: 1})));
+  byId("remaining-cap").textContent = money((mandate.max_amount_paise || 0) - cartState.total_paise);
+  byId("launch").hidden = !cartState.allowed;
+  byId("launch").textContent = "Create checkout";
+  byId("launch").onclick = createCheckout;
+}
+
+async function increaseMandate() {
+  const response = await fetch("/api/customer/mandate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "increase", mandate_id: mandate.id, cart_id: cartState.cart_id, request_id: crypto.randomUUID()})});
+  if (response.ok) { mandate = await response.json(); byId("mandate-status").textContent = "Mandate increased."; await reviewProducts(); }
+}
+
+async function createCheckout() {
+  const response = await fetch("/api/customer/checkout", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({cart_id: cartState.cart_id, mandate_id: mandate.id, request_id: crypto.randomUUID()})});
+  const result = await response.json();
+  if (response.ok && result.intent_id) { await readTransactions(result.intent_id); }
+  else byId("cart-status").textContent = (result.reasons || [result.message || "Checkout blocked."]).join(" ");
+}
+
 function renderCustomer(result) {
   customerData = result;
   const selected = transactions.find((transaction) => transaction.intent_id === result.intent_id);
@@ -67,7 +130,7 @@ function renderCustomer(result) {
     selected.status = result.status; selected.order_id = result.order_id; selected.payment_id = result.payment_id;
     renderTransactionHistory();
   }
-  byId("chat-submit").disabled = transactions.some(({status}) => ["CREATED", "PENDING", "AMBIGUOUS"].includes(status));
+  byId("chat-submit").disabled = !mandate || transactions.some(({status}) => ["CREATED", "PENDING", "AMBIGUOUS"].includes(status));
   byId("payment-status").textContent = result.found ? result.message : "Checkout not found.";
   if (result.found) renderStatus(result);
   byId("checkout-step").textContent = result.found ? "● Checkout" : "○ Checkout";
@@ -98,6 +161,7 @@ const eventLabels = {
   RAZORPAY_ORDER_CREATED: ["Checkout ready", "Provider order created."],
   CUSTOMER_MESSAGE: ["Agent update", "The purchase assistant recorded an update."],
   CLIENT_REPORTED: ["Payment submitted", "Browser reported a payment reference. Waiting for provider confirmation."],
+  CLIENT_REPORT_REJECTED: ["Client confirmation received", "Browser evidence was recorded; provider/webhook evidence remains authoritative."],
   WEBHOOK_RECEIVED: ["Provider evidence received", "Verified provider event received."],
   ATTEMPT_RESOLVED: ["Payment confirmed", "Authoritative payment state recorded."],
   RECONCILIATION_CHECKED: ["Reconciliation checked", "Existing provider state was checked."],
@@ -137,7 +201,17 @@ async function runChat(event) {
   const result = await response.json();
   if (!response.ok) { byId("chat-status").textContent = result.error || "The agent could not respond."; return; }
   byId("chat-status").textContent = result.message;
+  renderRecommendations(result.history.flatMap((entry) => entry.tool === "search_catalogue" && Array.isArray(entry.result) ? entry.result : []));
   if (result.checkout) await readTransactions(result.checkout.intent_id);
+}
+
+async function readMandate() {
+  const response = await fetch("/api/customer/mandate");
+  if (!response.ok) return;
+  mandate = await response.json();
+  if (!mandate.id) { byId("chat-submit").disabled = true; return; }
+  byId("max-limit").value = mandate.max_amount_paise / 100;
+  document.querySelectorAll("input[name=category]").forEach((input) => { input.checked = mandate.allowed_categories_json.includes(input.value); });
 }
 
 function showView(view) {
@@ -206,6 +280,15 @@ async function readOperator() {
   renderOperator(await response.json(), token);
 }
 
+async function readOperatorTransactions() {
+  const token = byId("operator-token").value;
+  const response = await fetch(`/api/operator/transactions?q=${encodeURIComponent(byId("operator-search").value.trim())}`, {headers: {"X-Operator-Token": token}});
+  if (!response.ok) { byId("operator-status").textContent = "Operator authorization failed."; return; }
+  const rows = (await response.json()).transactions || [];
+  byId("operator-transactions").replaceChildren(...rows.map((row) => { const item = document.createElement("div"); item.className = "transaction-choice"; const text = document.createElement("span"); text.textContent = `${row.status} · ${money(row.amount_paise)} · ${row.order_id || row.payment_id || row.intent_id}`; const view = document.createElement("button"); view.type = "button"; view.className = "secondary-button"; view.textContent = "View"; view.onclick = () => readOperator(row.intent_id); item.append(text, view); return item; }));
+  byId("operator-status").textContent = `${rows.length} transaction${rows.length === 1 ? "" : "s"} found.`;
+}
+
 async function reconcile(attemptId, token) {
   const response = await fetch("/api/operator/reconcile", {method: "POST", headers: {"Content-Type": "application/json", "X-Operator-Token": token}, body: JSON.stringify({attempt_id: attemptId})});
   byId("operator-status").textContent = response.ok ? "Reconciliation completed." : "Reconciliation unavailable.";
@@ -215,5 +298,8 @@ async function reconcile(attemptId, token) {
 document.querySelectorAll(".subnav button").forEach((button) => button.onclick = () => showView(button.dataset.view));
 if (byId("load")) byId("load").onclick = readCustomer;
 if (byId("chat-form")) byId("chat-form").onsubmit = runChat;
-if (byId("operator-load")) byId("operator-load").onclick = readOperator;
+if (byId("mandate-form")) { byId("mandate-form").onsubmit = saveMandate; readMandate(); }
+if (byId("select-products")) byId("select-products").onclick = reviewProducts;
+if (byId("operator-form")) byId("operator-form").addEventListener("submit", (event) => { event.preventDefault(); readOperator(); });
+if (byId("operator-discovery")) byId("operator-discovery").addEventListener("submit", (event) => { event.preventDefault(); readOperatorTransactions(); });
 if (byId("transaction-history")) readTransactions();

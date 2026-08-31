@@ -227,7 +227,10 @@ def _append_audit(
     payload: dict,
     evidence_source: str = "CHECKOUT",
 ) -> None:
-    # Every intent event uses this lock, so sequence allocation cannot race concurrent webhook/browser work.
+    # Lock both parents explicitly in the canonical payment order. Without the
+    # attempt lock first, the audit INSERT's FK check can wait on the attempt
+    # while a resolver holds attempt and waits on intent.
+    cursor.execute("SELECT id FROM payment_attempts WHERE id = %s FOR UPDATE", (attempt_id,))
     cursor.execute("SELECT id FROM checkout_intents WHERE id = %s FOR UPDATE", (intent_id,))
     cursor.execute(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence "

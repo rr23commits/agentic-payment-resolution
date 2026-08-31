@@ -1,17 +1,17 @@
 window.openRazorpayCheckout = function (checkout) {
   const status = document.getElementById("payment-status");
   const waiting = "Payment is being confirmed";
-  status.textContent = waiting;
+  if (status) status.textContent = "Razorpay checkout opened";
   const demoTimeout = document.getElementById("demo-timeout");
-  demoTimeout.hidden = false;
-  demoTimeout.onclick = () => fetch("/checkout/client-timeout", {
+  if (demoTimeout) demoTimeout.hidden = false;
+  if (demoTimeout) demoTimeout.onclick = () => fetch("/checkout/client-timeout", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({intent_id: checkout.intent_id, event: "timeout"}),
   }).then((response) => {
-    status.textContent = response.ok
+    if (status) status.textContent = response.ok
       ? "Payment is still being confirmed. Do not retry."
       : waiting;
-  }).catch(() => { status.textContent = waiting; });
+  }).catch(() => { if (status) status.textContent = waiting; });
 
   new window.Razorpay({
     key: checkout.razorpay_key_id,
@@ -26,7 +26,9 @@ window.openRazorpayCheckout = function (checkout) {
           razorpay_payment_id: response.razorpay_payment_id,
         }),
       }).catch(() => {});
-      status.textContent = waiting;
+      if (status) status.textContent = waiting;
+      if (typeof window.onRazorpayClientPayment === "function") window.onRazorpayClientPayment(checkout, response);
     },
+    modal: {ondismiss() { if (typeof window.onRazorpayDismiss === "function") window.onRazorpayDismiss(); }},
   }).open();
 };

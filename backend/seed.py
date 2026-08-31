@@ -16,6 +16,10 @@ def main() -> None:
     products = [
         ("product_demo_book", "The Demo Book", "A purchasable demo book", "books", 40000, 10, False),
         ("product_demo_game", "The Demo Game", "A category-failure demo product", "games", 2500, 10, False),
+        ("product_demo_tshirt_blue", "Blue Cotton T-Shirt", "Soft blue everyday t-shirt", "tshirts", 49900, 10, False),
+        ("product_demo_tshirt_black", "Black Cotton T-Shirt", "Classic black everyday t-shirt", "tshirts", 59900, 10, False),
+        ("product_demo_pants_chino", "Khaki Chinos", "Relaxed fit khaki pants", "pants", 79900, 10, False),
+        ("product_demo_pants_denim", "Indigo Denim Pants", "Straight fit denim pants", "pants", 89900, 10, False),
     ]
     mandates = [
         ("mandate_demo_valid", 50000, ["books"], now + timedelta(days=30)),

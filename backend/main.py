@@ -13,9 +13,11 @@ from urllib.parse import parse_qs, urlparse
 from agent.loop import run_agent
 from agent.gemini import gemini_first_model
 from backend.browser_checkout import record_client_payment_reference, record_client_timeout
+from backend.catalogue import create_cart, get_mandate, increase_mandate, update_mandate, validate_purchase
+from backend.checkout import start_checkout
 from backend.resolver import reconcile_status
 from backend.razorpay import RazorpayError
-from backend.views import customer_intent, customer_transactions, operator_intent
+from backend.views import customer_intent, customer_transactions, operator_intent, operator_transactions
 from backend.webhooks import ingest_webhook
 
 
@@ -41,15 +43,24 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/customer/transactions":
             self._json(HTTPStatus.OK, customer_transactions(DEMO_CUSTOMER_ID))
             return
+        if parsed.path == "/api/customer/mandate":
+            self._json(HTTPStatus.OK, get_mandate(DEMO_CUSTOMER_ID) or {"found": False})
+            return
         if parsed.path == "/api/operator/intent":
             if not self._operator_authorized():
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             self._json(HTTPStatus.OK, operator_intent(_query(parsed.query, "intent_id")))
             return
+        if parsed.path == "/api/operator/transactions":
+            if not self._operator_authorized():
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            self._json(HTTPStatus.OK, operator_transactions(_query(parsed.query, "q")))
+            return
         filename = {
             "/": "index.html", "/operator": "operator.html", "/checkout.js": "checkout.js",
-            "/app.js": "app.js", "/styles.css": "styles.css",
+            "/app.js": "app.js", "/customer.js": "customer.js", "/styles.css": "styles.css",
         }.get(parsed.path)
         if not filename:
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -68,6 +79,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/customer/chat":
             self._handle_customer_chat()
+            return
+        if self.path == "/api/customer/mandate":
+            self._handle_mandate()
+            return
+        if self.path == "/api/customer/cart":
+            self._handle_cart()
+            return
+        if self.path == "/api/customer/checkout":
+            self._handle_checkout()
             return
         if self.path == "/api/operator/reconcile":
             self._handle_reconcile()
@@ -136,6 +156,48 @@ class Handler(BaseHTTPRequestHandler):
             None,
         )
         self._json(HTTPStatus.OK, {**result, "checkout": checkout})
+
+    def _read_json(self, maximum: int = 16_384) -> dict:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if not 0 < content_length <= maximum:
+            raise ValueError("invalid request size")
+        body = json.loads(self.rfile.read(content_length))
+        if not isinstance(body, dict):
+            raise ValueError("object required")
+        return body
+
+    def _handle_mandate(self) -> None:
+        try:
+            body = self._read_json()
+            if body.get("action") == "increase":
+                result = increase_mandate(DEMO_CUSTOMER_ID, body["mandate_id"], body["cart_id"], request_id=body["request_id"])
+                self._json(HTTPStatus.OK, result)
+                return
+            from datetime import datetime
+            expires_at = datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00"))
+            result = update_mandate(DEMO_CUSTOMER_ID, body["max_amount_paise"], body["allowed_categories"], expires_at, request_id=body["request_id"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.send_error(HTTPStatus.BAD_REQUEST)
+            return
+        self._json(HTTPStatus.OK, result)
+
+    def _handle_cart(self) -> None:
+        try:
+            body = self._read_json()
+            cart = create_cart(body["items"], customer_id=DEMO_CUSTOMER_ID)
+            result = validate_purchase(cart["cart_id"], body["mandate_id"], customer_id=DEMO_CUSTOMER_ID)
+            self._json(HTTPStatus.OK, {**cart, **result})
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+
+    def _handle_checkout(self) -> None:
+        try:
+            body = self._read_json()
+            result = start_checkout(body["cart_id"], body["mandate_id"], body["request_id"], customer_id=DEMO_CUSTOMER_ID)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+        self._json(HTTPStatus.OK if result.get("allowed") else HTTPStatus.BAD_REQUEST, result)
 
     def _handle_razorpay_webhook(self) -> None:
         try:

@@ -45,7 +45,7 @@ TOOL_DEFINITIONS = [
         "message": {"type": "string"},
     }, ["message"])},
     {"name": "search_catalogue", "description": "Find purchasable catalogue products.", "parameters": _parameters({
-        "query": {"type": "string"}, "category": {"type": "string"},
+        "query": {"type": "string"}, "category": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 4},
     }, ["query"])},
     {"name": "get_product_details", "description": "Read current server-authoritative product details.", "parameters": _parameters({
         "product_id": {"type": "string"},
@@ -109,8 +109,8 @@ class AgentTools:
                 (f"audit_{uuid4().hex}", sequence, Jsonb({"message": message})),
             )
 
-    def search_catalogue(self, query: str, category: str | None = None) -> list[dict]:
-        return search_catalogue(query, category)
+    def search_catalogue(self, query: str, category: str | None = None, limit: int = 4) -> list[dict]:
+        return search_catalogue(query, category, limit)
 
     def get_product_details(self, product_id: str) -> dict | None:
         return get_product_details(product_id)

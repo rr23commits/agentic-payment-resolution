@@ -19,6 +19,21 @@ CREATE TABLE IF NOT EXISTS mandates (
     token TEXT NOT NULL
 );
 
+-- Revisions live beside the legacy 8-column mandate table so old fixtures and
+-- integrations remain insert-compatible.
+CREATE TABLE IF NOT EXISTS mandate_revisions (
+    mandate_id TEXT PRIMARY KEY REFERENCES mandates(id),
+    version INTEGER NOT NULL CHECK (version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS mandate_change_requests (
+    request_id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    mandate_id TEXT NOT NULL REFERENCES mandates(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS carts (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL,
