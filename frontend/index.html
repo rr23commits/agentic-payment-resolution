@@ -1,32 +1,35 @@
 <!doctype html>
 <html lang="en">
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agentic Checkout</title>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Razorpay Test Mode · Customer View</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
   <body>
-    <main>
-      <p><strong>Razorpay Test Mode</strong></p>
-      <h1>Your checkout</h1>
-      <section aria-labelledby="agent-heading">
-        <h2 id="agent-heading">Purchase with the agent</h2>
-        <form id="chat-form">
-          <label for="chat-request">What would you like to buy?</label>
-          <textarea id="chat-request" required rows="3" placeholder="Buy a book"></textarea>
-          <button type="submit">Ask agent</button>
-        </form>
-        <p id="chat-status" aria-live="polite"></p>
-        <ol id="chat-history"></ol>
+    <header class="topbar">
+      <a class="brand" href="/">Razorpay Test Mode <span class="env-pill">TEST</span></a>
+      <nav class="context-tabs" aria-label="Context"><a class="active" href="/">Customer View</a><a href="/operator">Operator View</a></nav>
+    </header>
+    <main class="page-shell">
+      <input id="intent-id" type="hidden" autocomplete="off">
+      <section id="transaction-history" class="transaction-history card hidden"><div class="section-heading"><h2>Transactions</h2></div><div id="transaction-list" class="transaction-list"></div></section>
+      <nav class="subnav" aria-label="Customer views"><button class="active" data-view="dashboard">Dashboard</button><button data-view="transactions">Transactions</button></nav>
+      <section id="dashboard-view" class="view active-view">
+        <div class="customer-grid">
+          <div class="left-stack">
+            <section class="card agent-card">
+              <div class="eyebrow">AI PURCHASE ASSISTANT</div><h1>Purchase with the agent</h1><p class="muted">Tell us what you need and we’ll verify it against your mandate.</p>
+              <form id="chat-form"><label for="chat-request">What would you like to buy?</label><input id="chat-request" required placeholder="Buy a book"><label for="max-limit">Max limit</label><div class="money-input"><span>₹</span><input id="max-limit" value="500" readonly aria-label="Maximum spending limit"></div><button id="chat-submit" class="primary-button" type="submit">Ask agent</button></form>
+              <p id="chat-status" class="agent-result" aria-live="polite"></p>
+            </section>
+            <section id="cart-card" class="card cart-card hidden"><div class="section-heading"><h2>Your checkout</h2><span class="status-dot">●</span></div><p class="muted">Review your purchase details below.</p><div id="cart-items"></div><div class="budget-row"><span>Remaining Authorized Cap</span><strong id="remaining-cap">—</strong></div></section>
+          </div>
+          <section class="card payment-card"><div id="payment-alert" class="alert pending"><span class="alert-icon">!</span><div><strong id="payment-title">Load a checkout to see payment status.</strong><p id="payment-copy"></p></div></div><div class="progress-steps"><span id="checkout-step">○ Checkout</span><i></i><span id="submitted-step">○ Payment submitted</span><i></i><span id="confirm-step">○ Confirmation pending</span></div><div class="detail-table"><div><span>Order ID</span><strong id="order-id">—</strong></div><div><span>Payment ID</span><strong id="payment-id">—</strong></div><div><span>Mandate Cap</span><strong id="mandate-cap">—</strong></div></div><button id="launch" class="secondary-button" hidden>Launch Checkout</button><button id="demo-timeout" class="text-button" hidden>Demo: simulate timeout/debit</button><p id="payment-status" class="sr-only" aria-live="polite"></p></section>
+        </div>
       </section>
-      <label>Checkout intent <input id="intent-id" autocomplete="off"></label>
-      <button id="load">Load checkout</button>
-      <p id="payment-status" aria-live="polite">Enter a checkout intent to view its status.</p>
-      <p id="mandate-outcome"></p>
-      <button id="launch" hidden>Launch Razorpay Test Mode checkout</button>
-      <button id="demo-timeout" hidden>Demo: simulate timeout/debit</button>
-      <p><a href="/operator">Operator view</a></p>
+      <section id="transactions-view" class="view"><div class="transaction-grid"><section class="card order-summary"><div class="section-heading"><h2>Order Summary</h2><span class="icon-box">▤</span></div><div class="rule"></div><span class="label">MERCHANT</span><strong id="transaction-merchant">—</strong><div id="transaction-item" class="transaction-item"></div><div class="rule"></div><span class="label">AUTHORIZATION</span><div class="mandate-badge">♜ <span>Pre-approved Mandate <small id="transaction-mandate-id">—</small> <small id="transaction-mandate">(Max: ₹—)</small></span></div><div class="totals"><div><span>Subtotal</span><strong id="transaction-subtotal">₹—</strong></div><div><span>Tax</span><strong id="transaction-tax">₹—</strong></div><div class="total"><span>Total</span><strong id="transaction-total">₹—</strong></div></div></section><section class="card confirmation-card"><div id="transaction-banner" class="confirmation-banner"><span id="transaction-banner-icon">!</span><div><strong id="confirmation-title">Load a transaction to see payment status.</strong><p id="confirmation-copy"></p></div></div><h2>Transaction Details</h2><div class="transaction-details"><div><span>PAYMENT ID</span><strong id="transaction-payment">—</strong></div><div><span>ORDER ID</span><strong id="transaction-order">—</strong></div></div><div class="cap-label"><span>Mandate Cap Used</span><strong id="cap-used">₹— of ₹—</strong></div><div class="cap-bar"><i id="cap-fill"></i></div><div class="timeline-heading"><h2>Processing Timeline</h2></div><div id="processing-timeline" class="processing-timeline"></div><div class="agent-status"><span>✦</span><div><strong>Agent Status</strong><small id="agent-status-copy">—</small></div></div></section></div></section>
     </main>
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-    <script src="/checkout.js"></script>
-    <script src="/app.js"></script>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script><script src="/checkout.js"></script><script src="/app.js"></script>
   </body>
 </html>

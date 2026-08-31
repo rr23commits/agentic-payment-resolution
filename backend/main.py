@@ -13,7 +13,7 @@ from agent.loop import run_agent
 from agent.gemini import gemini_first_model
 from backend.browser_checkout import record_client_payment_reference, record_client_timeout
 from backend.resolver import reconcile_status
-from backend.views import customer_intent, operator_intent
+from backend.views import customer_intent, customer_transactions, operator_intent
 from backend.webhooks import ingest_webhook
 
 
@@ -28,6 +28,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/customer/intent":
             self._json(HTTPStatus.OK, customer_intent(_query(parsed.query, "intent_id")))
             return
+        if parsed.path == "/api/customer/transactions":
+            self._json(HTTPStatus.OK, customer_transactions(DEMO_CUSTOMER_ID))
+            return
         if parsed.path == "/api/operator/intent":
             if not self._operator_authorized():
                 self.send_error(HTTPStatus.FORBIDDEN)
@@ -36,14 +39,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         filename = {
             "/": "index.html", "/operator": "operator.html", "/checkout.js": "checkout.js",
-            "/app.js": "app.js",
+            "/app.js": "app.js", "/styles.css": "styles.css",
         }.get(parsed.path)
         if not filename:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         content = (FRONTEND / filename).read_bytes()
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/javascript" if filename.endswith(".js") else "text/html")
+        content_type = "text/css" if filename.endswith(".css") else "text/javascript" if filename.endswith(".js") else "text/html"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)

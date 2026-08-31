@@ -1,20 +1,8 @@
 <!doctype html>
 <html lang="en">
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Operator · Agentic Checkout</title>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Razorpay Test Mode · Operator View</title><link rel="stylesheet" href="/styles.css"></head>
   <body>
-    <main>
-      <p><strong>Razorpay Test Mode · Operator</strong></p>
-      <h1>Payment resolution</h1>
-      <label>Intent <input id="operator-intent" autocomplete="off"></label>
-      <label>Operator token <input id="operator-token" type="password"></label>
-      <button id="operator-load">Load timeline</button>
-      <p id="operator-status" aria-live="polite"></p>
-      <button id="reconcile" hidden>Reconcile existing attempt</button>
-      <ol id="timeline"></ol>
-      <p><a href="/">Customer view</a></p>
-    </main>
-    <script src="/app.js"></script>
+    <header class="topbar"><a class="brand" href="/">Razorpay Test Mode <span class="env-pill">TEST</span></a><nav class="context-tabs" aria-label="Context"><a href="/">Customer View</a><a class="active" href="/operator">Operator View</a></nav></header>
+    <main class="page-shell operator-page"><div class="operator-intro"><div class="eyebrow">PAYMENT OPERATIONS</div><h1>Operator Console</h1><p class="muted">Inspect authoritative payment evidence and resolution history.</p></div><section class="query-bar card"><label>Intent ID<input id="operator-intent" autocomplete="off" placeholder="intent_…"></label><label>Operator Token<input id="operator-token" type="password" autocomplete="off" placeholder="Enter operator token"></label><button id="operator-load" class="primary-button">Load timeline</button></section><p id="operator-status" class="operator-status" aria-live="polite"></p><div id="operator-content" class="operator-grid hidden"><section class="left-stack"><div class="attempt-header card"><div><span class="eyebrow">PAYMENT ATTEMPT</span><strong id="attempt-id">—</strong></div><span id="attempt-transition" class="transition-tag">—</span></div><section class="card operator-card"><h2>Payment Details</h2><div class="kv-grid"><div><span>Amount</span><strong id="operator-amount">—</strong></div><div><span>Status</span><strong id="operator-state">—</strong></div><div><span>Razorpay Order ID</span><strong id="operator-order">—</strong></div><div><span>Razorpay Payment ID</span><strong id="operator-payment">—</strong></div><div><span>Mandate Cap</span><strong id="operator-cap">—</strong></div><div><span>Authoritative Timestamp</span><strong id="operator-authoritative-at">—</strong></div></div></section><section class="card operator-card"><h2>Evidence Verification</h2><div id="evidence-checklist" class="evidence-list"></div></section><section class="card reconcile-card"><button id="reconcile" class="secondary-button">Reconcile existing attempt</button><p>Checks the existing provider state without creating a duplicate charge.</p></section></section><section class="card audit-card"><div class="section-heading"><h2>Authoritative Event Timeline</h2><span class="filter-icon">≡</span></div><div id="timeline" class="audit-timeline"></div></section></div></main><script src="/app.js"></script>
   </body>
 </html>

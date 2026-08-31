@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 from backend.catalogue import create_cart, mandate_token
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
-from backend.views import customer_intent, operator_intent
+from backend.views import customer_intent, customer_transactions, operator_intent
 
 
 @unittest.skipUnless(os.environ.get("DATABASE_URL"), "DATABASE_URL is not set")
@@ -36,6 +36,9 @@ class ViewTests(unittest.TestCase):
         customer = customer_intent(checkout["intent_id"])
         self.assertEqual(customer["message"], "Payment is being confirmed. Do not retry.")
         self.assertEqual(customer["checkout"]["order_id"], "order_view")
+        history = customer_transactions("customer_view")
+        self.assertEqual(history["transactions"][0]["intent_id"], checkout["intent_id"])
+        self.assertEqual(history["transactions"][0]["product"], "Book")
         operator = operator_intent(checkout["intent_id"])
         self.assertEqual((operator["attempt_id"].startswith("attempt_"), operator["status"]), (True, "PENDING"))
         self.assertEqual(operator["timeline"][-1]["type"], "RAZORPAY_ORDER_CREATED")
