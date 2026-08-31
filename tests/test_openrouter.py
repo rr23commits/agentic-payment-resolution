@@ -75,6 +75,17 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual(body["tool_choice"], "required")
         self.assertEqual(body["tools"][0]["function"]["name"], "search_catalogue")
 
+    def test_accepts_final_text_only_after_successful_checkout(self) -> None:
+        message = {"role": "assistant", "content": "Checkout is ready."}
+        result = _parse_response({"choices": [{"message": message}]}, TOOLS, allow_final=True)
+        self.assertEqual(result, {"final": "Checkout is ready."})
+
+        body = _request_body({
+            "request": "Buy", "instructions": "Use tools.", "tools": TOOLS,
+            "history": [{"tool": "start_checkout", "result": {"allowed": True}}],
+        }, "model")
+        self.assertEqual(body["tool_choice"], "auto")
+
     def test_rejects_multiple_tool_calls(self) -> None:
         payload = {"choices": [{"message": {"tool_calls": [
             {"id": "call_1", "function": {"name": "search_catalogue", "arguments": "{}"}},

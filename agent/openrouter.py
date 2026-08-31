@@ -36,7 +36,7 @@ def openrouter_model(context: dict) -> dict:
         raise RuntimeError(f"OpenRouter request failed with HTTP {error.code}{suffix}") from error
     except URLError as error:
         raise RuntimeError("OpenRouter request failed") from error
-    return _parse_response(payload, context.get("tools", []))
+    return _parse_response(payload, context.get("tools", []), _has_successful_checkout(context.get("history", [])))
 
 
 def _request_body(context: dict, model: str) -> dict:
@@ -60,7 +60,7 @@ def _request_body(context: dict, model: str) -> dict:
             }
             for tool in tools
         ],
-        "tool_choice": "required",
+        "tool_choice": "auto" if _has_successful_checkout(context.get("history", [])) else "required",
         "parallel_tool_calls": False,
     }
 
@@ -85,7 +85,7 @@ def _messages(context: dict) -> list[dict]:
     return messages
 
 
-def _parse_response(payload: object, tools: list[dict]) -> dict:
+def _parse_response(payload: object, tools: list[dict], allow_final: bool = False) -> dict:
     """Accept exactly one allowed tool call, preserving provider metadata untouched."""
     try:
         message = payload["choices"][0]["message"]
@@ -95,6 +95,8 @@ def _parse_response(payload: object, tools: list[dict]) -> dict:
         raise _rejected(payload, "OpenRouter assistant message is invalid")
     # Content and reasoning are non-executable metadata; only one tool call may drive this turn.
     calls = message.get("tool_calls")
+    if allow_final and calls is None and isinstance(message.get("content"), str) and message["content"].strip():
+        return {"final": message["content"]}
     if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
         raise _rejected(payload, "OpenRouter response must contain one tool call")
     call = calls[0]
@@ -111,6 +113,15 @@ def _parse_response(payload: object, tools: list[dict]) -> dict:
         "tool": function["name"], "arguments": arguments,
         "_assistant_message": message, "_tool_call_id": call["id"],
     }
+
+
+def _has_successful_checkout(history: list[dict]) -> bool:
+    return bool(
+        history
+        and history[-1].get("tool") == "start_checkout"
+        and isinstance(history[-1].get("result"), dict)
+        and history[-1]["result"].get("allowed") is True
+    )
 
 
 def _rejected(payload: object, reason: str) -> ValueError:

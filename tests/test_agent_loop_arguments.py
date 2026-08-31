@@ -49,6 +49,33 @@ class AgentArgumentSafetyTests(unittest.TestCase):
         self.assertEqual(result["history"][0]["error"], "Exactly one available tool call is required")
 
     @patch("agent.loop.tools_for")
+    def test_successful_checkout_accepts_final_assistant_response(self, tools_for) -> None:
+        tools = Mock()
+        tools.start_checkout.return_value = {"allowed": True, "status": "PENDING", "intent_id": "intent_1"}
+        tools_for.return_value = tools
+        actions = iter((
+            {"tool": "start_checkout", "arguments": {"cart_id": "c", "mandate_id": "m", "client_request_id": "r"}},
+            {"final": "Checkout is ready."},
+        ))
+
+        result = run_agent("Buy it", customer_id="customer_demo", model=lambda _context: next(actions))
+
+        self.assertEqual(result["message"], "Checkout is ready.")
+        self.assertEqual(len(result["history"]), 1)
+
+    @patch("agent.loop.tools_for")
+    def test_respond_to_customer_remains_terminal(self, tools_for) -> None:
+        tools = Mock()
+        tools.respond_to_customer.return_value = {"message": "Done."}
+        tools_for.return_value = tools
+        model = Mock(return_value={"tool": "respond_to_customer", "arguments": {"message": "Done."}})
+
+        result = run_agent("Finish", customer_id="customer_demo", model=model)
+
+        self.assertEqual(result["message"], "Done.")
+        model.assert_called_once()
+
+    @patch("agent.loop.tools_for")
     def test_unresolved_checkout_keeps_only_observation_and_terminal_tools(self, tools_for) -> None:
         tools = Mock()
         tools.respond_to_customer.return_value = {"message": "Waiting."}

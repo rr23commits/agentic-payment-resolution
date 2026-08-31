@@ -38,6 +38,8 @@ def run_agent(
         if not isinstance(action, dict):
             history.append({"error": "Model returned an invalid action"})
             continue
+        if _terminal_response(action, history):
+            return {"message": action["final"], "history": history}
         name, arguments = action.get("tool"), action.get("arguments")
         if name not in _allowed_tools(history) or not isinstance(arguments, dict):
             history.append({"tool": name, "error": "Exactly one available tool call is required"})
@@ -106,3 +108,12 @@ def _allowed_tools(history: list[dict]) -> set[str]:
         ):
             return {"respond_to_customer", "get_payment_status", "get_audit_timeline"}
     return names
+
+
+def _terminal_response(action: dict, history: list[dict]) -> bool:
+    """Accept provider text only after a successful checkout tool result."""
+    final = action.get("final")
+    if set(action) != {"final"} or not isinstance(final, str) or not final.strip() or not history:
+        return False
+    result = history[-1].get("result")
+    return history[-1].get("tool") == "start_checkout" and isinstance(result, dict) and result.get("allowed") is True
