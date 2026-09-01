@@ -59,7 +59,10 @@ def ingest_webhook(body: bytes, signature: str | None, provider_event_id: str | 
                 attempt_id=attempt["id"],
                 event_type="WEBHOOK_RECEIVED",
                 evidence_source="RAZORPAY_WEBHOOK",
-                payload={"provider_event_id": provider_event_id, "event": payload.get("event")},
+                payload={"provider_event_id": provider_event_id, "event": payload.get("event"),
+                         "provider_event": payload.get("event"),
+                         "provider_status": (payload.get("event") or "").removeprefix("payment."),
+                         "matched_order_id": order_id, "signature_verified": True},
             )
             _resolve_attempt(cursor, attempt["id"], _provider_evidence(
                 "RAZORPAY_WEBHOOK", event=payload.get("event"),
@@ -96,7 +99,10 @@ def process_pending_webhooks(cursor, order_id: str) -> None:
         _append_audit(
             cursor, intent_id=attempt["intent_id"], attempt_id=attempt["id"],
             event_type="WEBHOOK_RECEIVED", evidence_source="RAZORPAY_WEBHOOK",
-            payload={"provider_event_id": event["provider_event_id"], "event": payload.get("event")},
+            payload={"provider_event_id": event["provider_event_id"], "event": payload.get("event"),
+                     "provider_event": payload.get("event"),
+                     "provider_status": (payload.get("event") or "").removeprefix("payment."),
+                     "matched_order_id": payment_order, "signature_verified": True},
         )
         _resolve_attempt(cursor, attempt["id"], _provider_evidence(
             "RAZORPAY_WEBHOOK", event=payload.get("event"),

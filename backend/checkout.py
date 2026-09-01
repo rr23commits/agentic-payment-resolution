@@ -50,7 +50,7 @@ def start_checkout(
                     "idempotent": True,
                     "intent_id": existing["intent_id"],
                     "status": existing["status"],
-                    "message": "Checkout was abandoned. Start a new checkout.",
+                    "message": "Payment is still being confirmed. Do not retry.",
                 }
             return {
                 "allowed": True,
@@ -65,7 +65,7 @@ def start_checkout(
         cursor.execute(
             "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
             "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-            "WHERE ci.customer_id = %s AND pa.status IN ('CREATED', 'PENDING', 'AMBIGUOUS')",
+            "WHERE ci.customer_id = %s AND pa.status IN ('CREATED', 'PENDING', 'AMBIGUOUS', 'ABANDONED')",
             (customer_id,),
         )
         active_attempt = cursor.fetchone()
@@ -73,7 +73,7 @@ def start_checkout(
             cursor.execute(
                 "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
                 "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status NOT IN ('FAILED', 'ABANDONED')",
+                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status NOT IN ('FAILED')",
                 (customer_id, cart_id),
             )
             active_attempt = cursor.fetchone()

@@ -47,9 +47,11 @@ def search_catalogue_for_customer(customer_id: str, query: str, category: str | 
         raise ValueError("Search limit must be between 1 and 4")
     mandate = get_mandate(customer_id)
     allowed = set(mandate["allowed_categories_json"]) if mandate and mandate["expires_at"] > datetime.now(timezone.utc) else set()
+    if category and category.casefold().replace("-", "").replace(" ", "") in {"tshirt", "tshirts"}:
+        category = "tshirts"
     if category and category not in allowed:
         return []
-    if category == "tshirts" and query.casefold().replace("-", "").replace(" ", "") in {"tshirt", "tshirts"}:
+    if query.casefold().replace("-", "").replace(" ", "") in {"tshirt", "tshirts"}:
         query = "shirt"
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         filters = ["(name ILIKE %s OR description ILIKE %s)", "category = ANY(%s)"]

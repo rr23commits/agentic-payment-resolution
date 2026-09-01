@@ -15,6 +15,7 @@ from backend.browser_checkout import record_client_payment_reference, record_cli
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
 from backend.resolver import _client_evidence, reconcile_status, resolve_attempt
+from backend.views import operator_intent
 from backend.webhooks import ingest_webhook
 
 
@@ -83,10 +84,17 @@ class WebhookTests(unittest.TestCase):
             self.assertIsNotNone(cursor.fetchone()[0])
 
     @patch("backend.checkout.create_order", return_value="order_authorized")
-    def test_authorized_webhook_resolves_to_captured(self, _create_order) -> None:
+    def test_authorized_webhook_stays_pending_until_capture(self, _create_order) -> None:
         checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_authorized", customer_id="customer_webhook")
         body, signature = self._event(checkout["order_id"], "payment.authorized")
         self.assertTrue(ingest_webhook(body, signature, "event_authorized")["accepted"])
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            self.assertEqual(cursor.fetchone()[0], "PENDING")
+            cursor.execute("SELECT stock FROM products WHERE id = 'product_webhook'")
+            self.assertEqual(cursor.fetchone()[0], 0)
+        body, signature = self._event(checkout["order_id"], "payment.captured")
+        self.assertTrue(ingest_webhook(body, signature, "event_captured_after_authorized")["accepted"])
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
             self.assertEqual(cursor.fetchone()[0], "CAPTURED")
@@ -100,6 +108,11 @@ class WebhookTests(unittest.TestCase):
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status, razorpay_payment_id FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
             self.assertEqual(cursor.fetchone(), ("CAPTURED", "pay_webhook"))
+        evidence = operator_intent(checkout["intent_id"])["evidence"]
+        self.assertTrue(evidence["signature_verified"])
+        self.assertEqual(evidence["provider_event"], "payment.captured")
+        self.assertEqual(evidence["matched_order_id"], checkout["order_id"])
+        self.assertEqual(evidence["client_payment_id"], "pay_attacker")
 
     @patch("backend.resolver.fetch_order_payments")
     @patch("backend.checkout.create_order", return_value="order_reconcile_race")

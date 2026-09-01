@@ -65,13 +65,14 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
         return {"attempt_id": attempt_id, "status": target, "idempotent": True}
     if not _allowed_transition(attempt["status"], target):
         return _exception(cursor, attempt, f"{attempt['status']} cannot transition to {target}")
-    if target in {"FAILED", "ABANDONED"} and attempt.get("stock_reserved"):
+    if target == "FAILED" and attempt.get("stock_reserved"):
         cursor.execute("SELECT cart_id FROM checkout_intents WHERE id = %s", (attempt["intent_id"],))
         _release_cart_stock(cursor, cursor.fetchone()["cart_id"])
+    canonical_payment_id = payment_id if evidence["source"] in PROVIDER_SOURCES else attempt["razorpay_payment_id"]
     cursor.execute(
-        "UPDATE payment_attempts SET status = %s, stock_reserved = FALSE, razorpay_payment_id = COALESCE(%s, razorpay_payment_id), "
+        "UPDATE payment_attempts SET status = %s, stock_reserved = FALSE, razorpay_payment_id = %s, "
         "last_authoritative_at = CURRENT_TIMESTAMP, resolution_reason = %s WHERE id = %s",
-        (target, payment_id, reason, attempt_id),
+        (target, canonical_payment_id, reason, attempt_id),
     )
     cursor.execute("UPDATE checkout_intents SET status = %s WHERE id = %s", (target, attempt["intent_id"]))
     _append_audit(
@@ -80,7 +81,12 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
         attempt_id=attempt_id,
         event_type="ATTEMPT_RESOLVED",
         evidence_source=evidence["source"],
-        payload={"status": target, "reason": reason},
+        payload={"status": target, "reason": reason,
+                 "provider_event": evidence.get("event"),
+                 "provider_status": evidence.get("status") or (evidence.get("event") or "").removeprefix("payment."),
+                 "matched_order_id": evidence.get("order_id"),
+                 "authoritative_payment_id": payment_id,
+                 "signature_verified": evidence.get("source") == "RAZORPAY_WEBHOOK"},
     )
     return {"attempt_id": attempt_id, "status": target, "idempotent": False}
 
@@ -132,8 +138,6 @@ def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
     if evidence.get("_authority") is not _AUTHORITY:
         return None, "Evidence was not assembled by a server authority boundary"
     if source == "CLIENT_REPORTED":
-        if evidence.get("event") == "checkout_abandoned" and attempt["status"] == "PENDING" and not attempt["razorpay_payment_id"]:
-            return "ABANDONED", "Customer abandoned checkout before payment submission"
         if evidence.get("event") in {"debit_reported", "timeout"} and attempt["status"] == "PENDING":
             return "AMBIGUOUS", evidence["event"]
         return None, "Client evidence cannot resolve this payment"
@@ -142,7 +146,7 @@ def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
     if evidence.get("order_id") != attempt["razorpay_order_id"]:
         return None, "Provider order reference does not match the attempt"
     status = evidence.get("status") or evidence.get("event", "").removeprefix("payment.")
-    targets = {"authorized": "CAPTURED", "captured": "CAPTURED", "failed": "FAILED", "reversed": "REVERSED", "refunded": "REFUNDED"}
+    targets = {"captured": "CAPTURED", "failed": "FAILED", "reversed": "REVERSED", "refunded": "REFUNDED"}
     if status not in targets:
         return None, "Provider evidence has no final payment status"
     return targets[status], f"Razorpay {status}"
@@ -150,7 +154,7 @@ def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
 
 def _allowed_transition(current: str, target: str) -> bool:
     if current in {"PENDING", "AMBIGUOUS"}:
-        return target in FINAL_STATUSES | {"AMBIGUOUS", "ABANDONED"}
+        return target in FINAL_STATUSES | {"AMBIGUOUS"}
     if current == "ABANDONED":
         return target in FINAL_STATUSES
     return current == "CAPTURED" and target in {"REVERSED", "REFUNDED"}

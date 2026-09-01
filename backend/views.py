@@ -118,12 +118,36 @@ def operator_intent(intent_id: str) -> dict:
              "created_at": event["created_at"]}
             for event in cursor
         ]
-    return {**intent, "found": True, "timeline": timeline}
+    return {**intent, "found": True, "timeline": timeline, "evidence": _evidence_summary(intent, timeline)}
 
 
 def _safe_detail(payload: dict) -> dict:
-    return {key: payload[key] for key in ("status", "reason", "reconciliation_required")
+    return {key: payload[key] for key in (
+        "status", "reason", "reconciliation_required", "provider_event", "provider_status",
+        "matched_order_id", "authoritative_payment_id", "signature_verified", "client_payment_id", "discrepancy",
+    )
             if isinstance(payload, dict) and key in payload}
+
+
+def _evidence_summary(intent: dict, timeline: list[dict]) -> dict:
+    resolved = next((event["detail"] for event in reversed(timeline) if event["type"] == "ATTEMPT_RESOLVED"), {})
+    webhook = next((event["detail"] for event in reversed(timeline) if event["type"] == "WEBHOOK_RECEIVED"), {})
+    client = next((event["detail"] for event in reversed(timeline) if event["type"] == "CLIENT_REPORTED"), {})
+    contradiction = next(
+        (event["detail"].get("reason") for event in reversed(timeline)
+         if event["type"] in {"RESOLUTION_EXCEPTION", "WEBHOOK_CONTRADICTION"} and event["detail"].get("reason")),
+        None,
+    )
+    return {
+        "current_status": intent["status"], "resolution_reason": intent["resolution_reason"],
+        "provider_event": resolved.get("provider_event") or webhook.get("provider_event"),
+        "provider_status": resolved.get("provider_status") or webhook.get("provider_status"),
+        "matched_order_id": resolved.get("matched_order_id") or webhook.get("matched_order_id"),
+        "authoritative_payment_id": intent["razorpay_payment_id"],
+        "signature_verified": webhook.get("signature_verified"), "contradiction": contradiction,
+        "client_payment_id": client.get("client_payment_id"),
+        "client_provider_discrepancy": bool(client.get("client_payment_id") and intent["razorpay_payment_id"] and client["client_payment_id"] != intent["razorpay_payment_id"]),
+    }
 
 
 def operator_transactions(query: str = "") -> dict:

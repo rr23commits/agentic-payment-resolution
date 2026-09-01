@@ -8,6 +8,7 @@ from agent.tools import TOOL_DEFINITIONS, tools_for
 
 
 LOGGER = logging.getLogger(__name__)
+_CATEGORY_ALIASES = {"tshirt": "tshirts", "tshirts": "tshirts", "pant": "pants", "pants": "pants", "book": "books", "books": "books"}
 
 
 def run_agent(
@@ -27,7 +28,7 @@ def run_agent(
             action = model(
                 {
                     "request": request,
-                    "instructions": "Every turn must select exactly one available tool. Use the available tools to fulfill purchase requests. Read the active mandate before catalogue searches. Treat numbers in requests as purchase quantities, never as catalogue-result counts; preserve each category quantity when creating a cart and say explicitly when stock cannot fulfill it. Search and return products only in mandate-allowed categories. If requested categories are outside the mandate, clearly name those categories and tell the customer to update Things I want; never modify the mandate or silently expand it. If a product is underspecified but searchable, search the catalogue first; for multiple requested categories, search each category separately with at most 4 results. Recommend products and wait for the customer-facing selection flow. When structured catalogue results exist, the final customer message must contain only a concise status and any excluded-category explanation; do not repeat product names, prices, or descriptions. Never change a mandate. Use respond_to_customer only when the task is complete, blocked by a deterministic tool result, or genuinely requires user input. You never determine payment state. After PENDING or AMBIGUOUS, do not start another payment; observe the existing attempt. A rejected checkout is terminal for this request; explain the rejection and do not retry checkout.",
+                    "instructions": "Every turn must select exactly one available tool. Use the available tools to fulfill purchase requests. Read the active mandate before catalogue searches. Treat numbers in requests as purchase quantities, never as catalogue-result counts; preserve each category quantity when creating a cart and say explicitly when stock cannot fulfill it. Search and return products only in mandate-allowed categories. If requested categories are outside the mandate, clearly name those categories and tell the customer to update Things I want; never modify the mandate or silently expand it. For mixed requests, search each allowed requested category independently before responding; an excluded category must not stop searches for allowed categories. If a product is underspecified but searchable, search the catalogue first; for multiple requested categories, search each category separately with at most 4 results. Recommend products and wait for the customer-facing selection flow. When structured catalogue results exist, the final customer message must contain only a concise status and any excluded-category explanation; do not repeat product names, prices, or descriptions. Never change a mandate. Use respond_to_customer only when the task is complete, blocked by a deterministic tool result, or genuinely requires user input. You never determine payment state. After PENDING or AMBIGUOUS, do not start another payment; observe the existing attempt. A rejected checkout is terminal for this request; explain the rejection and do not retry checkout.",
                     "tools": [tool for tool in TOOL_DEFINITIONS if tool["name"] in _allowed_tools(history)],
                     "history": _model_history(history),
                 }
@@ -45,6 +46,7 @@ def run_agent(
             history.append({"tool": name, "error": "Exactly one available tool call is required"})
             continue
         try:
+            arguments = _apply_explicit_quantities(request, name, arguments, history)
             _validate_tool_arguments(name, arguments)
             result = getattr(tools, name)(**arguments)
         except (AttributeError, TypeError, ValueError) as error:
@@ -66,6 +68,39 @@ def run_agent(
                 record_message(result["message"], intent_id)
             return {"message": result["message"], "history": history}
     return {"message": "I could not complete this request safely.", "history": history}
+
+
+def _requested_quantities(request: str) -> dict[str, int]:
+    normalized = re.sub(r"\bt[\s-]?shirts?\b", "tshirts", request, flags=re.IGNORECASE)
+    quantities = {}
+    for match in re.finditer(r"\b(\d+)\s+([a-z]+)\b", normalized, flags=re.IGNORECASE):
+        category = _CATEGORY_ALIASES.get(match.group(2).lower())
+        if category:
+            quantities[category] = int(match.group(1))
+    return quantities
+
+
+def _apply_explicit_quantities(request: str, name: str, arguments: dict, history: list[dict]) -> dict:
+    if name != "create_cart":
+        return arguments
+    requested = _requested_quantities(request)
+    if not requested or not isinstance(arguments.get("items"), list):
+        return arguments
+    categories = {}
+    for entry in history:
+        if entry.get("tool") not in {"search_catalogue", "get_product_details"}:
+            continue
+        results = entry.get("result")
+        results = results if isinstance(results, list) else [results]
+        for product in results:
+            if isinstance(product, dict) and product.get("id") and product.get("category"):
+                categories[product["id"]] = product["category"]
+    items = [
+        {**item, "quantity": requested.get(categories.get(item.get("product_id")), item.get("quantity"))}
+        if isinstance(item, dict) else item
+        for item in arguments["items"]
+    ]
+    return {**arguments, "items": items}
 
 
 def _safe_error_message(error: Exception) -> str:

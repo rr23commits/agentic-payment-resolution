@@ -1,7 +1,7 @@
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from psycopg.types.json import Jsonb
 
@@ -52,3 +52,27 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result["message"], "Payment is being confirmed. I will not start another payment.")
         self.assertEqual(start_checkout.call_count, 1)
         self.assertIn("get_payment_status", [entry.get("tool") for entry in result["history"]])
+
+    @patch("agent.loop.tools_for")
+    def test_explicit_supported_quantities_override_model_default_for_searched_products(self, tools_for) -> None:
+        tools = Mock()
+        tools.search_catalogue.return_value = [
+            {"id": "shirt", "category": "tshirts"}, {"id": "pants", "category": "pants"},
+        ]
+        tools.create_cart.return_value = {"cart_id": "cart_1", "total_paise": 1}
+        tools.get_mandate.return_value = {"id": "mandate_1"}
+        tools.validate_purchase.return_value = {"allowed": True}
+        tools.start_checkout.return_value = {"allowed": True, "status": "PENDING", "intent_id": "intent_1"}
+        tools_for.return_value = tools
+        actions = iter([
+            {"tool": "search_catalogue", "arguments": {"query": "T-Shirts"}},
+            {"tool": "create_cart", "arguments": {"items": [{"product_id": "shirt", "quantity": 1}, {"product_id": "pants", "quantity": 1}]}},
+            {"tool": "get_mandate", "arguments": {}},
+            {"tool": "validate_purchase", "arguments": {"cart_id": "cart_1", "mandate_id": "mandate_1"}},
+            {"tool": "start_checkout", "arguments": {"cart_id": "cart_1", "mandate_id": "mandate_1", "client_request_id": "request_1"}},
+            {"final": "Checkout is ready."},
+        ])
+        run_agent("2 T-Shirts and 3 pants", customer_id="customer_demo", model=lambda _context: next(actions))
+        self.assertEqual(tools.create_cart.call_args.kwargs["items"], [
+            {"product_id": "shirt", "quantity": 2}, {"product_id": "pants", "quantity": 3},
+        ])

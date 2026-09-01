@@ -11,6 +11,17 @@ const money = (paise) => paise == null ? "—" : `₹${(paise / 100).toFixed(2)}
 const requestId = () => crypto.randomUUID();
 const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS"]);
 const finalPayment = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED"]);
+const catalogueCategoryAliases = {tshirt: "tshirts", tshirts: "tshirts", pant: "pants", pants: "pants", book: "books", books: "books"};
+
+function extractRequestedQuantities(request) {
+  const normalized = request.replace(/\bt[\s-]?shirts?\b/gi, "tshirts");
+  const quantities = {};
+  for (const match of normalized.matchAll(/\b(\d+)\s+([a-z]+)\b/gi)) {
+    const category = catalogueCategoryAliases[match[2].toLowerCase()];
+    if (category) quantities[category] = Number(match[1]);
+  }
+  return quantities;
+}
 
 function nav(view) {
   const actualView = view === "dashboard" ? "shop" : view;
@@ -90,10 +101,15 @@ async function askAgent(event) {
   if (!response.ok) { $("chat-status").textContent = result.error || "The agent could not respond."; return; }
   const catalogueResults = result.history.flatMap((entry) => entry.tool === "search_catalogue" && Array.isArray(entry.result) ? entry.result : []);
   $("chat-status").textContent = catalogueResults.length ? (result.message || "I found these options for you.").split(/\n\s*\n/)[0] : (result.message || "The agent could not find matching products.");
-  requestedQuantities = {};
-  for (const match of $("chat-request").value.matchAll(/\b(\d+)\s+([a-z]+)/gi)) { const category = match[2].toLowerCase(); requestedQuantities[category] = Number(match[1]); requestedQuantities[category.replace(/s$/, "")] = Number(match[1]); }
+  requestedQuantities = extractRequestedQuantities($("chat-request").value);
   products = [...new Map(catalogueResults.filter((product) => product && product.id).map((product) => [product.id, product])).values()];
   selected = []; renderProducts();
+  if (result.checkout?.intent_id) {
+    const persisted = await loadIntent(result.checkout.intent_id);
+    if (result.checkout.allowed !== false && persisted?.status === "PENDING" && !persisted.payment_id && persisted.checkout?.order_id) {
+      window.openRazorpayCheckout(persisted.checkout);
+    }
+  }
 }
 
 async function reviewCart() {
@@ -152,7 +168,7 @@ function renderPayment(result) {
 
 async function loadIntent(intentId) {
   $("intent-id").value = intentId; const response = await fetch(`/api/customer/intent?intent_id=${encodeURIComponent(intentId)}`); if (!response.ok) return;
-  const result = await response.json(); if (result.found) { renderPayment(result); renderTransaction(result); }
+  const result = await response.json(); if (result.found) { renderPayment(result); renderTransaction(result); } return result;
 }
 
 function renderTransaction(result) {
@@ -174,7 +190,7 @@ async function loadTransactions(preferred, select = true) {
 }
 
 window.onRazorpayClientPayment = (_checkout, payment) => { renderPayment({intent_id: $("intent-id").value, status: "PENDING", payment_id: payment.razorpay_payment_id, order_id: payment.razorpay_order_id, message: "Payment submitted. Confirmation pending."}); loadIntent($("intent-id").value); };
-window.onRazorpayDismiss = (checkout) => { fetch("/checkout/client-cancel", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({intent_id: checkout.intent_id})}).then((response) => { $("cart-status").textContent = response.ok ? "Checkout cancelled. You can try again." : "Payment is being confirmed. Do not retry."; }).catch(() => { $("cart-status").textContent = "Payment is being confirmed. Do not retry."; }); };
+window.onRazorpayDismiss = (checkout) => { fetch("/checkout/client-cancel", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({intent_id: checkout.intent_id})}).then((response) => { $("cart-status").textContent = response.ok ? "Payment is still being confirmed. Do not retry." : "Payment is being confirmed. Do not retry."; }).catch(() => { $("cart-status").textContent = "Payment is being confirmed. Do not retry."; }); };
 $("mandate-form").onsubmit = saveMandate; $("chat-form").onsubmit = askAgent; $("select-products").onclick = reviewCart; $("open-cart").onclick = () => nav("cart"); $("edit-mandate").onclick = () => { nav("dashboard"); $("max-limit").focus(); };
 document.querySelectorAll(".customer-subnav button").forEach((button) => button.onclick = () => nav(button.dataset.view));
 document.addEventListener("click", (event) => { const picker = $("category-picker"); if (picker?.open && !picker.contains(event.target)) picker.open = false; });

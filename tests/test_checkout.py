@@ -326,32 +326,37 @@ class CheckoutTests(unittest.TestCase):
                 "SELECT status, razorpay_payment_id FROM payment_attempts WHERE intent_id = %s",
                 (checkout["intent_id"],),
             )
-            self.assertEqual(cursor.fetchone(), ("PENDING", "pay_browser_1"))
+            self.assertEqual(cursor.fetchone(), ("PENDING", None))
             cursor.execute(
                 "SELECT type FROM audit_events WHERE intent_id = %s ORDER BY sequence",
                 (checkout["intent_id"],),
             )
             self.assertEqual([row[0] for row in cursor][-1], "CLIENT_REPORTED")
+            cursor.execute(
+                "SELECT payload_json->>'client_payment_id' FROM audit_events "
+                "WHERE intent_id = %s AND type = 'CLIENT_REPORTED'",
+                (checkout["intent_id"],),
+            )
+            self.assertEqual(cursor.fetchone()[0], "pay_browser_1")
 
-    @patch("backend.checkout.create_order", side_effect=["order_abandoned", "order_retry"])
-    def test_modal_cancellation_releases_stock_and_allows_one_new_checkout(self, create_order) -> None:
+    @patch("backend.checkout.create_order", return_value="order_dismissed")
+    def test_modal_cancellation_keeps_stock_reserved_and_blocks_new_checkout(self, create_order) -> None:
         first = start_checkout(self.cart["cart_id"], self.mandate_id, "request_abandoned", customer_id=self.customer_id)
         cancelled = record_client_cancellation(first["intent_id"], self.customer_id)
         self.assertTrue(cancelled["accepted"])
-        self.assertEqual(cancelled["status"], "ABANDONED")
+        self.assertEqual(cancelled["status"], "PENDING")
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status, stock_reserved FROM payment_attempts WHERE intent_id = %s", (first["intent_id"],))
-            self.assertEqual(cursor.fetchone(), ("ABANDONED", False))
-            cursor.execute("SELECT stock FROM products WHERE id = 'product_checkout'")
-            self.assertEqual(cursor.fetchone()[0], 3)
-
-        retry = start_checkout(self.cart["cart_id"], self.mandate_id, "request_retry", customer_id=self.customer_id)
-        self.assertTrue(retry["allowed"])
-        self.assertNotEqual(first["intent_id"], retry["intent_id"])
-        self.assertEqual(create_order.call_count, 2)
-        with connect() as connection, connection.cursor() as cursor:
+            self.assertEqual(cursor.fetchone(), ("PENDING", True))
             cursor.execute("SELECT stock FROM products WHERE id = 'product_checkout'")
             self.assertEqual(cursor.fetchone()[0], 2)
+
+        retry = start_checkout(self.cart["cart_id"], self.mandate_id, "request_retry", customer_id=self.customer_id)
+        self.assertFalse(retry["allowed"])
+        self.assertEqual(create_order.call_count, 1)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT type FROM audit_events WHERE intent_id = %s ORDER BY sequence DESC LIMIT 1", (first["intent_id"],))
+            self.assertEqual(cursor.fetchone()[0], "CHECKOUT_BLOCKED")
 
     @patch("backend.checkout.create_order", return_value="order_cancel_blocked")
     def test_cancellation_does_not_close_submitted_or_ambiguous_attempts(self, create_order) -> None:
@@ -368,21 +373,52 @@ class CheckoutTests(unittest.TestCase):
         self.assertFalse(record_client_cancellation(submitted["intent_id"], self.customer_id)["accepted"])
 
     @patch("backend.checkout.create_order", return_value="order_late_capture")
-    def test_authoritative_provider_evidence_can_resolve_abandoned_attempt(self, _create_order) -> None:
+    def test_authorized_evidence_stays_pending_then_late_capture_resolves_same_attempt(self, create_order) -> None:
         checkout = start_checkout(self.cart["cart_id"], self.mandate_id, "request_late_capture", customer_id=self.customer_id)
         attempt_id = checkout["intent_id"]
         record_client_cancellation(attempt_id, self.customer_id)
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (attempt_id,))
             payment_attempt_id = cursor.fetchone()[0]
+            cursor.execute("SELECT stock FROM products WHERE id = 'product_checkout'")
+            self.assertEqual(cursor.fetchone()[0], 2)
+        authorized = resolve_attempt(
+            payment_attempt_id,
+            _provider_evidence("RAZORPAY_WEBHOOK", order_id=checkout["order_id"], payment_id="pay_authorized", status="authorized"),
+        )
+        self.assertEqual(authorized["status"], "PENDING")
+        self.assertTrue(authorized["reconciliation_required"])
+        retry = start_checkout(self.cart["cart_id"], self.mandate_id, "request_authorized_retry", customer_id=self.customer_id)
+        self.assertFalse(retry["allowed"])
+        self.assertEqual(create_order.call_count, 1)
         resolved = resolve_attempt(
             payment_attempt_id,
-            _provider_evidence("RAZORPAY_WEBHOOK", order_id=checkout["order_id"], payment_id="pay_late", status="captured"),
+            _provider_evidence("RAZORPAY_WEBHOOK", order_id=checkout["order_id"], payment_id="pay_captured", status="captured"),
         )
         self.assertEqual(resolved["status"], "CAPTURED")
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status, stock_reserved, razorpay_payment_id FROM payment_attempts WHERE id = %s", (payment_attempt_id,))
-            self.assertEqual(cursor.fetchone(), ("CAPTURED", False, "pay_late"))
+            self.assertEqual(cursor.fetchone(), ("CAPTURED", False, "pay_captured"))
+
+    @patch("backend.checkout.create_order", side_effect=["order_failed", "order_retry"])
+    def test_authoritative_failure_releases_stock_and_allows_new_checkout(self, create_order) -> None:
+        first = start_checkout(self.cart["cart_id"], self.mandate_id, "request_failure", customer_id=self.customer_id)
+        record_client_cancellation(first["intent_id"], self.customer_id)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (first["intent_id"],))
+            attempt_id = cursor.fetchone()[0]
+        resolved = resolve_attempt(
+            attempt_id,
+            _provider_evidence("RAZORPAY_WEBHOOK", order_id=first["order_id"], payment_id="pay_failed", status="failed"),
+        )
+        self.assertEqual(resolved["status"], "FAILED")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT stock FROM products WHERE id = 'product_checkout'")
+            self.assertEqual(cursor.fetchone()[0], 3)
+
+        retry = start_checkout(self.cart["cart_id"], self.mandate_id, "request_after_failure", customer_id=self.customer_id)
+        self.assertTrue(retry["allowed"])
+        self.assertEqual(create_order.call_count, 2)
 
     @patch("backend.checkout.create_order", return_value="order_test_4")
     def test_wrong_browser_order_reference_changes_nothing(self, create_order) -> None:

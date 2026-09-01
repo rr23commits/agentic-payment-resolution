@@ -68,28 +68,46 @@ class AgentToolTests(unittest.TestCase):
         self.assertEqual({item["category"] for category in ("books", "tshirts", "pants") for item in self.tools.search_catalogue("Book" if category == "books" else "Cotton", category=category)}, {"books", "tshirts", "pants"})
         self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, {"tshirts"})
 
+    def test_natural_tshirt_search_forms_use_the_allowed_category(self) -> None:
+        from backend.catalogue import update_mandate
+        update_mandate(
+            "customer_agent", 100000, ["tshirts"],
+            datetime.now(timezone.utc) + timedelta(days=2), request_id="tshirt-search-mandate",
+        )
+        expected = {"product_shirt"}
+        for query in ("tshirt", "tshirts", "T-Shirt", "T-Shirts", "t-shirts"):
+            with self.subTest(query=query):
+                self.assertEqual({item["id"] for item in self.tools.search_catalogue(query)}, expected)
+        self.assertEqual({item["id"] for item in self.tools.search_catalogue("T-Shirts", category="T-Shirts")}, expected)
+
     def test_agent_cannot_mutate_mandate_or_bypass_category_filter(self) -> None:
         self.assertFalse(hasattr(self.tools, "update_mandate"))
         self.assertFalse(hasattr(self.tools, "increase_mandate"))
         self.assertIsNone(self.tools.get_product_details("product_shirt"))
 
-    def test_mixed_request_returns_books_and_identifies_unsupported_categories(self) -> None:
+    def test_mixed_request_keeps_allowed_results_and_explains_excluded_category(self) -> None:
         from backend.catalogue import update_mandate
         update_mandate(
-            "customer_agent", 100000, ["books", "pants"],
+            "customer_agent", 100000, ["tshirts", "pants"],
             datetime.now(timezone.utc) + timedelta(days=2), request_id="mixed-mandate",
         )
 
+        seen_requests = []
+
         def model(context):
+            seen_requests.append(context["request"])
             if len(context["history"]) == 0:
                 return {"tool": "get_mandate", "arguments": {}}
             if len(context["history"]) == 1:
-                return {"tool": "search_catalogue", "arguments": {"query": "Pants", "category": "pants"}}
+                return {"tool": "search_catalogue", "arguments": {"query": "tshirts"}}
             if len(context["history"]) == 2:
                 return {"tool": "search_catalogue", "arguments": {"query": "Book", "category": "books"}}
-            return {"tool": "respond_to_customer", "arguments": {"message": "I can help with Books and Pants. T-Shirts are not currently included in Things I want."}}
+            return {"tool": "respond_to_customer", "arguments": {"message": "I found T-Shirt options. Books are outside your current mandate, so I left them out."}}
 
-        result = run_agent("I want a t-shirt, pants and books", customer_id="customer_agent", model=model)
+        result = run_agent("I want 2 tshirts and 3 books", customer_id="customer_agent", model=model)
         searches = [entry["result"] for entry in result["history"] if entry.get("tool") == "search_catalogue"]
-        self.assertEqual({product["category"] for products in searches for product in products}, {"books", "pants"})
-        self.assertIn("T-Shirts", result["message"])
+        self.assertEqual({product["category"] for products in searches for product in products}, {"tshirts"})
+        self.assertEqual([product["id"] for product in searches[0]], ["product_shirt"])
+        self.assertIn("Books", result["message"])
+        self.assertIn("outside", result["message"])
+        self.assertTrue(all(request == "I want 2 tshirts and 3 books" for request in seen_requests))

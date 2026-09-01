@@ -1,4 +1,5 @@
 import json
+import subprocess
 import threading
 import unittest
 from http.client import HTTPConnection
@@ -126,11 +127,41 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertIn("window.openRazorpayCheckout(result)", source)
         self.assertIn('result.status === "AMBIGUOUS" ? result.message', source)
         self.assertIn(' : "Checkout ready"', source)
+        self.assertIn("if (result.checkout?.intent_id)", source)
+        self.assertIn("const persisted = await loadIntent(result.checkout.intent_id)", source)
+        self.assertIn('persisted?.status === "PENDING" && !persisted.payment_id', source)
+        self.assertIn("window.openRazorpayCheckout(persisted.checkout)", source)
+        self.assertIn("extractRequestedQuantities", source)
+        self.assertIn('t[\\s-]?shirts?', source)
+        self.assertIn('catalogueCategoryAliases', source)
+        with open("frontend/app.js", encoding="utf-8") as file:
+            operator_source = file.read()
+        self.assertIn('const evidence = result.evidence || {}', operator_source)
+        self.assertIn("Webhook Signature Verified", operator_source)
+        self.assertIn("Resolution Reason", operator_source)
+
+        with open("frontend/index.html", encoding="utf-8") as file:
+            markup = file.read()
+        self.assertIn("Payment protection — An unresolved payment is never automatically retried.", markup)
+        self.assertIn("Controlled demo · single customer session", markup)
+        self.assertIn(">Customer</span>", markup)
+        self.assertNotIn('aria-label="Help"', markup)
+        self.assertNotIn('aria-label="Settings"', markup)
 
         with open("frontend/checkout.js", encoding="utf-8") as file:
             checkout_source = file.read()
         self.assertIn('window.onRazorpayDismiss(checkout)', checkout_source)
         self.assertIn('fetch("/checkout/client-cancel"', source)
+
+    def test_customer_quantity_parser_handles_supported_phrases(self) -> None:
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            source = file.read()
+        start = source.index("function extractRequestedQuantities")
+        end = source.index("\n}\n\nfunction nav", start) + 2
+        aliases = source[source.index("const catalogueCategoryAliases"):source.index(";", source.index("const catalogueCategoryAliases")) + 1]
+        script = aliases + "\n" + source[start:end] + "\nconsole.log(JSON.stringify(extractRequestedQuantities('2 T-Shirts and 3 pants')));"
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {"tshirts": 2, "pants": 3})
 
     @patch("backend.main.reconcile_status", return_value={"status": "CAPTURED"})
     def test_operator_reconcile_uses_attempt_id(self, reconcile) -> None:
