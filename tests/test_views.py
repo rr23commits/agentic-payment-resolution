@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 from backend.catalogue import create_cart, mandate_token
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
-from backend.views import customer_intent, customer_transactions, operator_intent
+from backend.views import customer_intent, customer_transactions, operator_intent, operator_transactions
 
 
 @unittest.skipUnless(os.environ.get("DATABASE_URL"), "DATABASE_URL is not set")
@@ -43,6 +43,9 @@ class ViewTests(unittest.TestCase):
         self.assertEqual((operator["attempt_id"].startswith("attempt_"), operator["status"]), (True, "PENDING"))
         self.assertEqual(operator["timeline"][-1]["type"], "RAZORPAY_ORDER_CREATED")
         self.assertNotIn("razorpay_order_id", operator["timeline"][-1]["detail"])
+        selected = operator_transactions()["transactions"][0]
+        self.assertEqual(selected["intent_id"], checkout["intent_id"])
+        self.assertTrue(operator_intent(selected["intent_id"])["found"])
 
     @patch("backend.checkout.create_order", return_value="order_view_owner")
     def test_customer_projection_rejects_other_customer(self, _create_order) -> None:

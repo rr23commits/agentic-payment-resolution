@@ -6,6 +6,7 @@ from unittest.mock import patch
 from psycopg.types.json import Jsonb
 
 from agent.tools import TOOL_DEFINITIONS, tools_for
+from agent.loop import run_agent
 from backend.catalogue import create_cart, mandate_token
 from backend.db import connect, migrate
 
@@ -25,7 +26,12 @@ class AgentToolTests(unittest.TestCase):
         )
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("TRUNCATE webhook_events, audit_events, payment_attempts, checkout_intents, carts, mandates, products CASCADE")
-            cursor.execute("INSERT INTO products VALUES ('product_agent', 'Book', 'Book', 'books', 40000, 1, FALSE)")
+            cursor.execute(
+                "INSERT INTO products VALUES "
+                "('product_agent', 'Book', 'Book', 'books', 40000, 1, FALSE), "
+                "('product_shirt', 'T-Shirt', 'Cotton shirt', 'tshirts', 30000, 1, FALSE), "
+                "('product_pants', 'Pants', 'Cotton pants', 'pants', 30000, 1, FALSE)"
+            )
             cursor.execute("INSERT INTO mandates VALUES ('mandate_agent', 'customer_agent', 'merchant_demo', 'agent_1', 50000, %s, %s, %s)", (Jsonb(["books"]), expires_at, token))
         self.tools = tools_for("customer_agent")
 
@@ -52,3 +58,38 @@ class AgentToolTests(unittest.TestCase):
         result = self.tools.validate_purchase(cart["cart_id"], "mandate_agent")
         self.assertFalse(result["allowed"])
         self.assertIn("Cart does not belong to this customer", result["reasons"])
+
+    def test_search_is_filtered_by_active_mandate_and_updates_with_revision(self) -> None:
+        self.assertEqual([item["category"] for item in self.tools.search_catalogue("Book")], ["books"])
+        self.assertEqual(self.tools.search_catalogue("Cotton", category="tshirts"), [])
+        expires_at = datetime.now(timezone.utc) + timedelta(days=2)
+        from backend.catalogue import update_mandate
+        update_mandate("customer_agent", 100000, ["books", "tshirts", "pants"], expires_at, request_id="agent-mandate-edit")
+        self.assertEqual({item["category"] for category in ("books", "tshirts", "pants") for item in self.tools.search_catalogue("Book" if category == "books" else "Cotton", category=category)}, {"books", "tshirts", "pants"})
+        self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, {"tshirts"})
+
+    def test_agent_cannot_mutate_mandate_or_bypass_category_filter(self) -> None:
+        self.assertFalse(hasattr(self.tools, "update_mandate"))
+        self.assertFalse(hasattr(self.tools, "increase_mandate"))
+        self.assertIsNone(self.tools.get_product_details("product_shirt"))
+
+    def test_mixed_request_returns_books_and_identifies_unsupported_categories(self) -> None:
+        from backend.catalogue import update_mandate
+        update_mandate(
+            "customer_agent", 100000, ["books", "pants"],
+            datetime.now(timezone.utc) + timedelta(days=2), request_id="mixed-mandate",
+        )
+
+        def model(context):
+            if len(context["history"]) == 0:
+                return {"tool": "get_mandate", "arguments": {}}
+            if len(context["history"]) == 1:
+                return {"tool": "search_catalogue", "arguments": {"query": "Pants", "category": "pants"}}
+            if len(context["history"]) == 2:
+                return {"tool": "search_catalogue", "arguments": {"query": "Book", "category": "books"}}
+            return {"tool": "respond_to_customer", "arguments": {"message": "I can help with Books and Pants. T-Shirts are not currently included in Things I want."}}
+
+        result = run_agent("I want a t-shirt, pants and books", customer_id="customer_agent", model=model)
+        searches = [entry["result"] for entry in result["history"] if entry.get("tool") == "search_catalogue"]
+        self.assertEqual({product["category"] for products in searches for product in products}, {"books", "pants"})
+        self.assertIn("T-Shirts", result["message"])

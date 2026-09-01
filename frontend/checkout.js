@@ -1,6 +1,7 @@
 window.openRazorpayCheckout = function (checkout) {
   const status = document.getElementById("payment-status");
   const waiting = "Payment is being confirmed";
+  let submitted = false;
   if (status) status.textContent = "Razorpay checkout opened";
   const demoTimeout = document.getElementById("demo-timeout");
   if (demoTimeout) demoTimeout.hidden = false;
@@ -17,6 +18,7 @@ window.openRazorpayCheckout = function (checkout) {
     key: checkout.razorpay_key_id,
     order_id: checkout.order_id,
     handler(response) {
+      submitted = true;
       fetch("/checkout/client-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -29,6 +31,6 @@ window.openRazorpayCheckout = function (checkout) {
       if (status) status.textContent = waiting;
       if (typeof window.onRazorpayClientPayment === "function") window.onRazorpayClientPayment(checkout, response);
     },
-    modal: {ondismiss() { if (typeof window.onRazorpayDismiss === "function") window.onRazorpayDismiss(); }},
+    modal: {ondismiss() { if (!submitted && typeof window.onRazorpayDismiss === "function") window.onRazorpayDismiss(checkout); }},
   }).open();
 };

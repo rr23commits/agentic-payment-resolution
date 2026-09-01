@@ -69,16 +69,9 @@ ALTER TABLE payment_attempts ADD COLUMN IF NOT EXISTS stock_reserved BOOLEAN NOT
 -- provider result cannot disappear and trigger a second external action.
 ALTER TABLE payment_attempts ALTER COLUMN razorpay_order_id DROP NOT NULL;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'payment_attempts_valid_status'
-    ) THEN
-        ALTER TABLE payment_attempts ADD CONSTRAINT payment_attempts_valid_status
-        CHECK (status IN ('CREATED', 'PENDING', 'AMBIGUOUS', 'CAPTURED', 'FAILED', 'REVERSED', 'REFUNDED'));
-    END IF;
-END;
-$$;
+ALTER TABLE payment_attempts DROP CONSTRAINT IF EXISTS payment_attempts_valid_status;
+ALTER TABLE payment_attempts ADD CONSTRAINT payment_attempts_valid_status
+    CHECK (status IN ('CREATED', 'PENDING', 'AMBIGUOUS', 'ABANDONED', 'CAPTURED', 'FAILED', 'REVERSED', 'REFUNDED'));
 
 -- The database, not a future caller, enforces the unresolved-attempt boundary.
 CREATE UNIQUE INDEX IF NOT EXISTS payment_attempts_one_active_per_intent

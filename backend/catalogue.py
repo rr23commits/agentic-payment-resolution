@@ -39,10 +39,49 @@ def search_catalogue(query: str, category: str | None = None, limit: int = 4) ->
         return list(cursor.fetchall())
 
 
+def search_catalogue_for_customer(customer_id: str, query: str, category: str | None = None, limit: int = 4) -> list[dict]:
+    """Search only categories in the customer's current mandate."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("Search query is required")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 4:
+        raise ValueError("Search limit must be between 1 and 4")
+    mandate = get_mandate(customer_id)
+    allowed = set(mandate["allowed_categories_json"]) if mandate and mandate["expires_at"] > datetime.now(timezone.utc) else set()
+    if category and category not in allowed:
+        return []
+    if category == "tshirts" and query.casefold().replace("-", "").replace(" ", "") in {"tshirt", "tshirts"}:
+        query = "shirt"
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        filters = ["(name ILIKE %s OR description ILIKE %s)", "category = ANY(%s)"]
+        values: list[object] = [f"%{query}%", f"%{query}%", list(allowed)]
+        if category:
+            filters.append("category = %s")
+            values.append(category)
+        cursor.execute(
+            "SELECT id, name, description, category, price_paise FROM products "
+            "WHERE restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY name LIMIT %s",
+            [*values, limit],
+        )
+        return list(cursor.fetchall())
+
+
 def get_product_details(product_id: str) -> dict | None:
     """Return the current server-authoritative product record."""
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SELECT id, name, description, category, price_paise FROM products WHERE id = %s AND restricted = FALSE", (product_id,))
+        return cursor.fetchone()
+
+
+def get_product_details_for_customer(customer_id: str, product_id: str) -> dict | None:
+    """Return product details only when its category is mandate-authorized."""
+    mandate = get_mandate(customer_id)
+    allowed = set(mandate["allowed_categories_json"]) if mandate and mandate["expires_at"] > datetime.now(timezone.utc) else set()
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            "SELECT id, name, description, category, price_paise FROM products "
+            "WHERE id = %s AND restricted = FALSE AND category = ANY(%s)",
+            (product_id, list(allowed)),
+        )
         return cursor.fetchone()
 
 

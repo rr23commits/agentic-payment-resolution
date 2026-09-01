@@ -10,6 +10,7 @@ from backend.db import connect
 MESSAGES = {
     "PENDING": "Payment is being confirmed. Do not retry.",
     "AMBIGUOUS": "Payment is still being confirmed. Do not retry.",
+    "ABANDONED": "Checkout was cancelled; you may try again.",
     "CAPTURED": "Payment confirmed.",
     "FAILED": "Payment failed; you may try again.",
     "REVERSED": "Payment was reversed.",

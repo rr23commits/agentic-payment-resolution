@@ -3,8 +3,8 @@
 from backend.catalogue import (
     create_cart,
     get_mandate,
-    get_product_details,
-    search_catalogue,
+    get_product_details_for_customer,
+    search_catalogue_for_customer,
     validate_purchase,
 )
 from backend.checkout import _append_audit, start_checkout
@@ -110,10 +110,10 @@ class AgentTools:
             )
 
     def search_catalogue(self, query: str, category: str | None = None, limit: int = 4) -> list[dict]:
-        return search_catalogue(query, category, limit)
+        return search_catalogue_for_customer(self.customer_id, query, category, limit)
 
     def get_product_details(self, product_id: str) -> dict | None:
-        return get_product_details(product_id)
+        return get_product_details_for_customer(self.customer_id, product_id)
 
     def create_cart(self, items: list[dict]) -> dict:
         return create_cart(items, customer_id=self.customer_id)

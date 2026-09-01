@@ -30,6 +30,24 @@ def record_client_timeout(intent_id: str, customer_id: str, event: str = "timeou
     return {"accepted": True, **result, "message": "Payment is still being confirmed. Do not retry."}
 
 
+def record_client_cancellation(intent_id: str, customer_id: str) -> dict:
+    """Close only an unsubmitted Razorpay checkout so a new attempt can be created."""
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            "SELECT pa.id AS attempt_id, pa.intent_id, pa.status, pa.razorpay_payment_id, ci.customer_id "
+            "FROM payment_attempts pa JOIN checkout_intents ci ON ci.id = pa.intent_id "
+            "WHERE ci.id = %s FOR UPDATE OF pa",
+            (intent_id,),
+        )
+        attempt = cursor.fetchone()
+        if not attempt or attempt["customer_id"] != customer_id:
+            return {"accepted": False, "message": WAITING_MESSAGE}
+        if attempt["status"] != "PENDING" or attempt["razorpay_payment_id"]:
+            return {"accepted": False, "message": WAITING_MESSAGE, "status": attempt["status"]}
+        result = _resolve_attempt(cursor, attempt["attempt_id"], _client_evidence("checkout_abandoned"))
+    return {"accepted": True, **result, "message": "Checkout cancelled. You can try again."}
+
+
 def record_client_payment_reference(
     intent_id: str, customer_id: str, razorpay_order_id: str, razorpay_payment_id: str
 ) -> dict:

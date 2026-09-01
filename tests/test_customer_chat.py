@@ -93,6 +93,45 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         connection.close()
 
+    @patch("backend.main.validate_purchase", return_value={
+        "allowed": True, "cart_total_paise": 169800, "mandate_cap_paise": 200000,
+        "reasons": [], "cart_id": "cart_customer", "mandate_id": "mandate_customer",
+    })
+    @patch("backend.main.create_cart", return_value={
+        "cart_id": "cart_customer", "customer_id": "customer_demo", "total_paise": 169800,
+    })
+    def test_customer_cart_response_keeps_authoritative_validation_fields(self, _create_cart, _validate) -> None:
+        connection = HTTPConnection(*self.server.server_address)
+        connection.request(
+            "POST", "/api/customer/cart",
+            json.dumps({"items": [{"product_id": "product_pants", "quantity": 2}], "mandate_id": "mandate_customer"}),
+            {"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        result = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(result["cart_total_paise"], 169800)
+        self.assertEqual(result["mandate_cap_paise"], 200000)
+
+    def test_customer_renderer_uses_validation_projection_and_waits_for_client_payment(self) -> None:
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            source = file.read()
+        self.assertIn("money(cart.cart_total_paise)", source)
+        self.assertIn("money(cart.mandate_cap_paise)", source)
+        self.assertIn("increase.hidden = false", source)
+        self.assertIn("increase.onclick = increaseMandate", source)
+        self.assertIn("await reviewCart();", source)
+        self.assertIn('$("launch").hidden = !cart.allowed', source)
+        self.assertIn("window.openRazorpayCheckout(result)", source)
+        self.assertIn('result.status === "AMBIGUOUS" ? result.message', source)
+        self.assertIn(' : "Checkout ready"', source)
+
+        with open("frontend/checkout.js", encoding="utf-8") as file:
+            checkout_source = file.read()
+        self.assertIn('window.onRazorpayDismiss(checkout)', checkout_source)
+        self.assertIn('fetch("/checkout/client-cancel"', source)
+
     @patch("backend.main.reconcile_status", return_value={"status": "CAPTURED"})
     def test_operator_reconcile_uses_attempt_id(self, reconcile) -> None:
         with patch.dict("os.environ", {"OPERATOR_VIEW_TOKEN": "operator-secret"}):

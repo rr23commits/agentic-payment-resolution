@@ -13,10 +13,11 @@ const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS"]);
 const finalPayment = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED"]);
 
 function nav(view) {
-  document.querySelectorAll(".shop-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  document.querySelectorAll(".customer-view").forEach((section) => section.classList.toggle("active-view", section.id === `${view}-view`));
-  if (view === "cart") renderCart();
-  if (view === "transactions") loadTransactions();
+  const actualView = view === "dashboard" ? "shop" : view;
+  document.querySelectorAll(".customer-subnav button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  document.querySelectorAll(".customer-view").forEach((section) => section.classList.toggle("active-view", section.id === `${actualView}-view`));
+  if (actualView === "cart") renderCart();
+  if (actualView === "transactions") loadTransactions();
 }
 
 function renderMandate() {
@@ -36,7 +37,7 @@ function renderCategoryPicker(selectedCategories = []) {
 
 function updateCategorySummary() {
   const selectedCategories = [...document.querySelectorAll("#category-options input:checked")].map((input) => input.value);
-  $("category-summary").replaceChildren(...(selectedCategories.length ? selectedCategories.map((category) => { const chip = document.createElement("span"); chip.className = "category-chip"; chip.textContent = category; return chip; }) : [document.createTextNode("Choose categories")]));
+  const summary = $("category-summary"); summary.replaceChildren(document.createTextNode("Things I Want"), ...selectedCategories.map((category) => { const chip = document.createElement("span"); chip.className = "category-chip"; chip.textContent = category; return chip; }));
 }
 
 async function loadMandate() {
@@ -57,13 +58,17 @@ async function saveMandate(event) {
 
 function productCard(product) {
   const card = document.createElement("label"); card.className = "product-card";
+  const top = document.createElement("span"); top.className = "product-card-top";
+  const name = document.createElement("strong"); name.textContent = product.name;
+  const price = document.createElement("b"); price.textContent = money(product.price_paise); top.append(name, price);
+  const description = document.createElement("small"); description.className = "product-card-description"; description.textContent = product.description || product.category;
+  const bottom = document.createElement("span"); bottom.className = "product-card-bottom";
   const input = document.createElement("input"); input.type = "checkbox"; input.checked = selected.some(({id}) => id === product.id);
   input.onchange = () => { selected = products.filter((item) => item.id === product.id ? input.checked : selected.some(({id}) => id === item.id)); renderProducts(); };
-  const details = document.createElement("span"); const name = document.createElement("strong"); name.textContent = product.name;
-  const description = document.createElement("small"); description.textContent = product.description || product.category;
   const quantity = document.createElement("input"); quantity.type = "number"; quantity.min = "1"; quantity.max = "1000"; quantity.value = selected.find(({id}) => id === product.id)?.quantity || requestedQuantities[product.category] || 1; quantity.setAttribute("aria-label", `Quantity of ${product.name}`);
-  quantity.onchange = () => { const item = selected.find(({id}) => id === product.id); if (item) item.quantity = Math.max(1, Number(quantity.value) || 1); };
-  const price = document.createElement("b"); price.textContent = money(product.price_paise); details.append(name, description); card.append(input, details, quantity, price); return card;
+  const total = document.createElement("span"); total.className = "product-card-total"; total.textContent = money(product.price_paise * Number(quantity.value));
+  quantity.onchange = () => { const item = selected.find(({id}) => id === product.id); if (item) item.quantity = Math.max(1, Number(quantity.value) || 1); total.textContent = money(product.price_paise * Number(quantity.value)); };
+  bottom.append(input, quantity, total); card.append(top, description, bottom); return card;
 }
 
 function renderProducts() {
@@ -73,7 +78,7 @@ function renderProducts() {
   if (!products.length) { box.className = "recommendations empty-state"; box.textContent = "Ask the agent to see products."; }
   else {
     box.className = "recommendations";
-    groups.forEach((items, category) => { const section = document.createElement("section"); const heading = document.createElement("h3"); heading.textContent = category; section.append(heading, ...items.map(productCard)); box.append(section); });
+    groups.forEach((items, category) => { const section = document.createElement("section"); const heading = document.createElement("h3"); heading.textContent = category === "tshirts" ? "T-Shirts" : category; section.append(heading, ...items.map(productCard)); box.append(section); });
   }
   $("select-products").classList.toggle("hidden", !selected.length);
 }
@@ -83,10 +88,11 @@ async function askAgent(event) {
   const response = await fetch("/api/customer/chat", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({request: $("chat-request").value})});
   const result = await response.json();
   if (!response.ok) { $("chat-status").textContent = result.error || "The agent could not respond."; return; }
-  $("chat-status").textContent = "Select the products you want.";
+  const catalogueResults = result.history.flatMap((entry) => entry.tool === "search_catalogue" && Array.isArray(entry.result) ? entry.result : []);
+  $("chat-status").textContent = catalogueResults.length ? (result.message || "I found these options for you.").split(/\n\s*\n/)[0] : (result.message || "The agent could not find matching products.");
   requestedQuantities = {};
   for (const match of $("chat-request").value.matchAll(/\b(\d+)\s+([a-z]+)/gi)) { const category = match[2].toLowerCase(); requestedQuantities[category] = Number(match[1]); requestedQuantities[category.replace(/s$/, "")] = Number(match[1]); }
-  products = result.history.flatMap((entry) => entry.tool === "search_catalogue" && Array.isArray(entry.result) ? entry.result : []);
+  products = [...new Map(catalogueResults.filter((product) => product && product.id).map((product) => [product.id, product])).values()];
   selected = []; renderProducts();
 }
 
@@ -104,15 +110,15 @@ function renderCart() {
   const hasCart = Boolean(cart?.cart_id);
   $("cart-empty").classList.toggle("hidden", hasCart);
   $("cart-items").replaceChildren(...(hasCart ? selected.map((product) => { const row = document.createElement("div"); row.className = "cart-row"; const name = document.createElement("span"); name.textContent = `${product.name} × ${product.quantity || 1}`; const price = document.createElement("strong"); price.textContent = money(product.price_paise * (product.quantity || 1)); row.append(name, price); return row; }) : []));
-  const count = hasCart ? selected.reduce((total, product) => total + (product.quantity || 1), 0) : 0; $("cart-count").textContent = hasCart ? `(${count})` : ""; $("cart-count-label").textContent = hasCart ? `${count} item${count === 1 ? "" : "s"}` : ""; $("shop-cart-summary").textContent = hasCart ? `${count} · ${money(cart.total_paise)}` : "";
+  const count = hasCart ? selected.reduce((total, product) => total + (product.quantity || 1), 0) : 0; $("cart-count").textContent = hasCart ? `(${count})` : ""; $("cart-count-label").textContent = hasCart ? `${count} item${count === 1 ? "" : "s"}` : ""; $("shop-cart-summary").textContent = hasCart ? `${count} · ${money(cart.cart_total_paise)}` : "";
   if (!hasCart) return;
-  $("cart-total").textContent = money(cart.total_paise); $("cart-mandate").textContent = money(mandate.max_amount_paise);
+  $("cart-total").textContent = money(cart.cart_total_paise); $("cart-mandate").textContent = money(cart.mandate_cap_paise);
   $("cart-status").textContent = cart.allowed ? "Within your mandate. Checkout is ready." : (cart.reasons || []).join(" ");
   const increase = $("increase-mandate");
   if (!cart.allowed && cart.cart_total_paise > cart.mandate_cap_paise) {
-    const suggested = Math.ceil(cart.cart_total_paise / 10000) * 10000; increase.textContent = `Increase mandate to ${money(suggested)}`; increase.classList.remove("hidden"); increase.onclick = increaseMandate;
-  } else increase.classList.add("hidden");
-  $("launch").classList.toggle("hidden", !cart.allowed); $("launch").onclick = createCheckout;
+    const suggested = Math.ceil(cart.cart_total_paise / 10000) * 10000; increase.textContent = `Increase mandate to ${money(suggested)}`; increase.hidden = false; increase.classList.remove("hidden"); increase.onclick = increaseMandate;
+  } else { increase.hidden = true; increase.classList.add("hidden"); }
+  $("launch").hidden = !cart.allowed; $("launch").classList.toggle("hidden", !cart.allowed); $("launch").onclick = createCheckout;
 }
 
 async function increaseMandate() {
@@ -132,9 +138,10 @@ function showCheckoutReady(result) {
 }
 
 function renderPayment(result) {
+  const submitted = Boolean(result.payment_id);
   if (finalPayment.has(result.status)) { clearInterval(poll); poll = undefined; }
-  $("payment-panel").classList.remove("hidden"); $("payment-title").textContent = result.status === "CAPTURED" ? "Payment confirmed" : result.message || "Payment is being confirmed.";
-  $("payment-copy").textContent = result.status === "CAPTURED" ? "Your order is confirmed." : "Your payment is being verified. Do not retry.";
+  $("payment-panel").classList.remove("hidden"); $("payment-title").textContent = result.status === "CAPTURED" ? "Payment confirmed" : submitted || result.status === "AMBIGUOUS" ? result.message || "Payment is being confirmed." : "Checkout ready";
+  $("payment-copy").textContent = result.status === "CAPTURED" ? "Your order is confirmed." : submitted || result.status === "AMBIGUOUS" ? "Your payment is being verified. Do not retry." : "Razorpay will open to complete your payment.";
   $("payment-alert").className = `alert ${result.status === "CAPTURED" ? "success" : finalPayment.has(result.status) ? "error" : "pending"}`;
   $("checkout-step").textContent = "✓ Checkout"; $("submitted-step").textContent = result.payment_id ? "✓ Payment submitted" : "○ Payment submitted"; $("confirm-step").textContent = result.status === "CAPTURED" ? "✓ Payment confirmed" : "○ Confirmation pending";
   $("order-id").textContent = result.order_id || "—"; $("payment-id").textContent = result.payment_id || "—";
@@ -167,7 +174,8 @@ async function loadTransactions(preferred, select = true) {
 }
 
 window.onRazorpayClientPayment = (_checkout, payment) => { renderPayment({intent_id: $("intent-id").value, status: "PENDING", payment_id: payment.razorpay_payment_id, order_id: payment.razorpay_order_id, message: "Payment submitted. Confirmation pending."}); loadIntent($("intent-id").value); };
-window.onRazorpayDismiss = () => { $("cart-status").textContent = "Checkout cancelled. Your cart is still here."; };
-$("mandate-form").onsubmit = saveMandate; $("chat-form").onsubmit = askAgent; $("select-products").onclick = reviewCart; $("open-cart").onclick = () => nav("cart"); $("edit-mandate").onclick = () => { nav("shop"); $("max-limit").focus(); };
-document.querySelectorAll(".shop-nav button").forEach((button) => button.onclick = () => nav(button.dataset.view));
-loadMandate(); loadTransactions(); renderProducts();
+window.onRazorpayDismiss = (checkout) => { fetch("/checkout/client-cancel", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({intent_id: checkout.intent_id})}).then((response) => { $("cart-status").textContent = response.ok ? "Checkout cancelled. You can try again." : "Payment is being confirmed. Do not retry."; }).catch(() => { $("cart-status").textContent = "Payment is being confirmed. Do not retry."; }); };
+$("mandate-form").onsubmit = saveMandate; $("chat-form").onsubmit = askAgent; $("select-products").onclick = reviewCart; $("open-cart").onclick = () => nav("cart"); $("edit-mandate").onclick = () => { nav("dashboard"); $("max-limit").focus(); };
+document.querySelectorAll(".customer-subnav button").forEach((button) => button.onclick = () => nav(button.dataset.view));
+document.addEventListener("click", (event) => { const picker = $("category-picker"); if (picker?.open && !picker.contains(event.target)) picker.open = false; });
+renderCategoryPicker(); loadMandate(); loadTransactions(); renderProducts();

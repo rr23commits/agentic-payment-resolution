@@ -44,6 +44,14 @@ def start_checkout(
                     "status": existing["status"],
                     "message": "Checkout is still being created. Do not retry.",
                 }
+            if existing["status"] == "ABANDONED":
+                return {
+                    "allowed": False,
+                    "idempotent": True,
+                    "intent_id": existing["intent_id"],
+                    "status": existing["status"],
+                    "message": "Checkout was abandoned. Start a new checkout.",
+                }
             return {
                 "allowed": True,
                 "idempotent": True,
@@ -65,7 +73,7 @@ def start_checkout(
             cursor.execute(
                 "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
                 "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status <> 'FAILED'",
+                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status NOT IN ('FAILED', 'ABANDONED')",
                 (customer_id, cart_id),
             )
             active_attempt = cursor.fetchone()

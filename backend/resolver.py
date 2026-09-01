@@ -65,7 +65,7 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
         return {"attempt_id": attempt_id, "status": target, "idempotent": True}
     if not _allowed_transition(attempt["status"], target):
         return _exception(cursor, attempt, f"{attempt['status']} cannot transition to {target}")
-    if target == "FAILED" and attempt.get("stock_reserved"):
+    if target in {"FAILED", "ABANDONED"} and attempt.get("stock_reserved"):
         cursor.execute("SELECT cart_id FROM checkout_intents WHERE id = %s", (attempt["intent_id"],))
         _release_cart_stock(cursor, cursor.fetchone()["cart_id"])
     cursor.execute(
@@ -132,6 +132,8 @@ def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
     if evidence.get("_authority") is not _AUTHORITY:
         return None, "Evidence was not assembled by a server authority boundary"
     if source == "CLIENT_REPORTED":
+        if evidence.get("event") == "checkout_abandoned" and attempt["status"] == "PENDING" and not attempt["razorpay_payment_id"]:
+            return "ABANDONED", "Customer abandoned checkout before payment submission"
         if evidence.get("event") in {"debit_reported", "timeout"} and attempt["status"] == "PENDING":
             return "AMBIGUOUS", evidence["event"]
         return None, "Client evidence cannot resolve this payment"
@@ -148,7 +150,9 @@ def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
 
 def _allowed_transition(current: str, target: str) -> bool:
     if current in {"PENDING", "AMBIGUOUS"}:
-        return target in FINAL_STATUSES | {"AMBIGUOUS"}
+        return target in FINAL_STATUSES | {"AMBIGUOUS", "ABANDONED"}
+    if current == "ABANDONED":
+        return target in FINAL_STATUSES
     return current == "CAPTURED" and target in {"REVERSED", "REFUNDED"}
 
 

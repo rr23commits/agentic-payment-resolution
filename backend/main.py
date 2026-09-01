@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agent.loop import run_agent
 from agent.gemini import gemini_first_model
-from backend.browser_checkout import record_client_payment_reference, record_client_timeout
+from backend.browser_checkout import record_client_cancellation, record_client_payment_reference, record_client_timeout
 from backend.catalogue import create_cart, get_mandate, increase_mandate, update_mandate, validate_purchase
 from backend.checkout import start_checkout
 from backend.resolver import reconcile_status
@@ -98,6 +98,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/checkout/client-timeout":
             self._handle_client_timeout()
             return
+        if self.path == "/checkout/client-cancel":
+            self._handle_client_cancel()
+            return
         if self.path != "/checkout/client-report":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -124,6 +127,18 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("invalid request size")
             body = json.loads(self.rfile.read(content_length))
             result = record_client_timeout(body["intent_id"], DEMO_CUSTOMER_ID, body.get("event", "timeout"))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.send_error(HTTPStatus.BAD_REQUEST)
+            return
+        self._json(HTTPStatus.ACCEPTED if result["accepted"] else HTTPStatus.BAD_REQUEST, result)
+
+    def _handle_client_cancel(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < content_length <= 16_384:
+                raise ValueError("invalid request size")
+            body = json.loads(self.rfile.read(content_length))
+            result = record_client_cancellation(body["intent_id"], DEMO_CUSTOMER_ID)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
@@ -274,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        if self.path.startswith(("/api/", "/checkout/", "/webhooks/")):
+        if self.path.startswith(("/api/", "/checkout/", "/webhooks/")) or self.path.split("?", 1)[0] == "/customer.js":
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 

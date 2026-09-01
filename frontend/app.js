@@ -261,6 +261,7 @@ function renderOperator(result, token) {
   byId("attempt-transition").textContent = result.status === "CAPTURED" ? "PENDING → CAPTURED" : `${result.status} (Awaiting Authority)`;
   byId("operator-amount").textContent = money(result.total_paise);
   byId("operator-state").textContent = result.status;
+  byId("operator-intent-id").textContent = result.id || "—";
   byId("operator-order").textContent = shortId(result.razorpay_order_id);
   byId("operator-payment").textContent = shortId(result.razorpay_payment_id);
   byId("operator-cap").textContent = money(result.max_amount_paise);
@@ -273,9 +274,9 @@ function renderOperator(result, token) {
   byId("timeline").replaceChildren(...(result.timeline || []).map((event) => { const item = document.createElement("div"); const [label, description] = eventLabels[event.type] || [event.type, "Recorded in the payment audit trail."]; item.className = `audit-event ${["WEBHOOK_RECEIVED", "ATTEMPT_RESOLVED"].includes(event.type) ? "authoritative" : ""}`; const time = document.createElement("time"); time.textContent = new Date(event.created_at).toLocaleTimeString(); const title = document.createElement("strong"); title.textContent = label; const copy = document.createElement("small"); copy.textContent = event.type === "ATTEMPT_RESOLVED" ? `${description} State: ${event.detail?.status || result.status}.` : description; item.append(time, title, copy); return item; }));
 }
 
-async function readOperator() {
+async function readOperator(intentId = byId("operator-intent").value.trim()) {
   const token = byId("operator-token").value;
-  const response = await fetch(`/api/operator/intent?intent_id=${encodeURIComponent(byId("operator-intent").value.trim())}`, {headers: {"X-Operator-Token": token}});
+  const response = await fetch(`/api/operator/intent?intent_id=${encodeURIComponent(intentId)}`, {headers: {"X-Operator-Token": token}});
   if (!response.ok) { byId("operator-status").textContent = "Operator authorization failed or intent was not found."; byId("operator-content").classList.add("hidden"); return; }
   renderOperator(await response.json(), token);
 }
