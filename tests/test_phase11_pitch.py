@@ -34,7 +34,8 @@ class PitchFlowTests(unittest.TestCase):
         )
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("TRUNCATE webhook_events, audit_events, payment_attempts, checkout_intents, carts, mandates, products CASCADE")
-            cursor.execute("INSERT INTO products VALUES ('product_pitch', 'Book', 'Book', 'books', 40000, 1, FALSE)")
+            cursor.execute("INSERT INTO products VALUES ('product_pitch', 'Book', 'Book', 'books', 40000, 1, FALSE), ('product_pitch_cap', 'Canvas Cap', 'Cap', 'accessories', 5000, 1, FALSE)")
+            cursor.execute("INSERT INTO product_metadata (product_id, related_product_ids_json, recommendation_reason) VALUES ('product_pitch', %s, 'A small add-on for your reading trip.')", (Jsonb(["product_pitch_cap"]),))
             cursor.execute("INSERT INTO mandates VALUES ('mandate_pitch', 'customer_pitch', 'merchant_demo', 'agent_1', 50000, %s, %s, %s)", (Jsonb(["books"]), expires_at, token))
 
     @patch("backend.checkout.create_order", return_value="order_pitch")
@@ -46,7 +47,7 @@ class PitchFlowTests(unittest.TestCase):
             if last_tool is None:
                 return {"tool": "search_catalogue", "arguments": {"query": "book"}}
             if last_tool == "search_catalogue":
-                return {"tool": "create_cart", "arguments": {"items": [{"product_id": "product_pitch", "quantity": 1}]}}
+                return {"tool": "create_cart", "arguments": {"items": [{"product_id": "product_pitch_cap", "quantity": 1, "source": "recommendation"}]}}
             if last_tool == "create_cart":
                 return {"tool": "get_mandate", "arguments": {}}
             if last_tool == "get_mandate":
@@ -62,6 +63,10 @@ class PitchFlowTests(unittest.TestCase):
         self.assertEqual(result["message"], "Payment is being confirmed. I will not start another payment.")
         self.assertEqual(create_order.call_count, 1)
         self.assertEqual(tools_for("customer_pitch").get_payment_status(checkout["intent_id"])["status"], "PENDING")
+        cart_result = next(entry["result"] for entry in result["history"] if entry.get("tool") == "create_cart")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT items_json FROM carts WHERE id = %s", (cart_result["cart_id"],))
+            self.assertEqual(cursor.fetchone()[0][0]["source"], "recommendation")
 
         body = json.dumps({"event": "payment.captured", "payload": {"payment": {"entity": {"id": "pay_pitch", "order_id": checkout["order_id"]}}}}, separators=(",", ":")).encode()
         signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()

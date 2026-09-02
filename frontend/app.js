@@ -302,7 +302,7 @@ async function loadMetrics() {
   const response = await fetch("/api/operator/metrics", {headers: {"X-Operator-Token": token}});
   if (!response.ok) return;
   const metrics = await response.json();
-  const labels = {requests: "Requests", recommendations_accepted: "Recommendations accepted", carts: "Carts", checkout_conversion: "Checkout conversion", average_order_value_paise: "Average order value", cross_sell_attachment_rate: "Cross-sell attachment", captured_revenue_paise: "Captured revenue", duplicate_charges_prevented: "Duplicate charges prevented", ambiguous_payments_resolved: "Ambiguous payments resolved"};
+  const labels = {requests: "Requests", recommendations_accepted: "Recommendations accepted", recommendation_revenue_paise: "Recommendation revenue", carts: "Carts", checkout_conversion: "Checkout conversion", average_order_value_paise: "Average order value", cross_sell_attachment_rate: "Cross-sell attachment", captured_revenue_paise: "Captured revenue", duplicate_charges_prevented: "Duplicate charges prevented", ambiguous_payments_resolved: "Ambiguous payments resolved"};
   byId("merchant-metrics").replaceChildren(...Object.entries(labels).map(([key, label]) => { const cell = document.createElement("div"); const name = document.createElement("span"); name.textContent = label; const value = document.createElement("strong"); value.textContent = key.endsWith("paise") ? money(metrics[key]) : key.endsWith("rate") || key === "checkout_conversion" ? `${(metrics[key] * 100).toFixed(1)}%` : metrics[key]; cell.append(name, value); return cell; }));
 }
 

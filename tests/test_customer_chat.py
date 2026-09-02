@@ -141,9 +141,9 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertIn("let displayedProducts = [];", source)
         self.assertIn("let displayedRecommendations = [];", source)
         self.assertIn('function productCard(product)', source)
-        self.assertIn('const price = document.createElement("b"); price.textContent = money(product.price_paise)', source)
-        self.assertIn('description.textContent = product.description || product.category', source)
-        self.assertIn('items: selected.map(({id, quantity = 1}) => ({product_id: id, quantity}))', source)
+        self.assertIn('const price = document.createElement("b"); price.textContent = money(product.payable_price_paise ?? product.price_paise)', source)
+        self.assertIn('description.textContent = product.source === "recommendation"', source)
+        self.assertIn('items: selected.map(({id, quantity = 1, source = "search"}) => ({product_id: id, quantity, source}))', source)
         self.assertIn('renderCategoryPicker(mandate?.allowed_categories_json || [], displayedRecommendations.map(({category}) => category))', source)
         self.assertNotIn('$("category-picker").open = true', source)
         self.assertIn('function renderCategoryPicker(selectedCategories = [], extraCategories = [])', source)
@@ -223,8 +223,8 @@ const fetch = async (_url, options) => {
                 {"id": "product_demo_book", "quantity": 3},
             ],
             "retry": [
-                {"product_id": "product_demo_tshirt_blue", "quantity": 2},
-                {"product_id": "product_demo_book", "quantity": 3},
+                {"product_id": "product_demo_tshirt_blue", "quantity": 2, "source": "search"},
+                {"product_id": "product_demo_book", "quantity": 3, "source": "search"},
             ],
             "cart": {"cart_id": "cart_valid", "cart_total_paise": 129800, "allowed": True},
         })

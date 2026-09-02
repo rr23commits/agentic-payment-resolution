@@ -63,14 +63,14 @@ class AgentToolTests(unittest.TestCase):
         cart = self.tools.create_cart([{"product_id": "product_pants", "quantity": 1}])
         self.assertTrue(self.tools.validate_purchase(cart["cart_id"], "mandate_agent")["allowed"])
 
-    def test_search_and_details_do_not_apply_mandate_categories(self) -> None:
+    def test_search_and_details_are_mandate_scoped(self) -> None:
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("Book")], ["books"])
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("books")], ["books"])
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("books", category="books")], ["books"])
-        self.assertEqual([item["category"] for item in self.tools.search_catalogue("Cotton", category="tshirts")], ["tshirts"])
-        self.assertEqual(self.tools.get_product_details("product_shirt")["category"], "tshirts")
+        self.assertEqual(self.tools.search_catalogue("Cotton", category="tshirts"), [])
+        self.assertIsNone(self.tools.get_product_details("product_shirt"))
         self.assertEqual(get_product_details("product_shirt")["category"], "tshirts")
-        self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, {"tshirts"})
+        self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, set())
 
     def test_natural_tshirt_search_forms_use_the_allowed_category(self) -> None:
         from backend.catalogue import update_mandate
@@ -108,7 +108,7 @@ class AgentToolTests(unittest.TestCase):
 
         result = run_agent("I want 2 tshirts and 3 books", customer_id="customer_agent", model=model)
         searches = [entry["result"] for entry in result["history"] if entry.get("tool") == "search_catalogue"]
-        self.assertEqual({product["category"] for products in searches for product in products}, {"books", "tshirts"})
+        self.assertEqual({product["category"] for products in searches for product in products}, {"tshirts"})
         self.assertEqual([product["id"] for product in searches[0]], ["product_shirt"])
         self.assertIn("Books", result["message"])
         self.assertIn("outside", result["message"])

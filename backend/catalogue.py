@@ -42,7 +42,7 @@ def search_catalogue(query: str, category: str | None = None, limit: int = 4) ->
             "WHERE p.restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY p.name LIMIT %s",
             [*values, limit],
         )
-        return _attach_recommendations(cursor, list(cursor.fetchall()))
+        return _mark_products(_attach_recommendations(cursor, list(cursor.fetchall())))
 
 
 def search_catalogue_for_customer(customer_id: str, query: str, category: str | None = None, limit: int = 4) -> list[dict]:
@@ -59,9 +59,10 @@ def search_catalogue_for_customer(customer_id: str, query: str, category: str | 
         return []
     if query.casefold().replace("-", "").replace(" ", "") in {"tshirt", "tshirts"}:
         query = "shirt"
+    terms = [query, query[:-1]] if query.casefold().endswith("s") and len(query) > 1 else [query]
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-        filters = ["(name ILIKE %s OR description ILIKE %s)", "category = ANY(%s)"]
-        values: list[object] = [f"%{query}%", f"%{query}%", list(allowed)]
+        filters = ["(" + " OR ".join("name ILIKE %s OR description ILIKE %s" for _ in terms) + ")", "category = ANY(%s)"]
+        values: list[object] = [value for term in terms for value in (f"%{term}%", f"%{term}%")] + [list(allowed)]
         if category:
             filters.append("category = %s")
             values.append(category)
@@ -74,7 +75,7 @@ def search_catalogue_for_customer(customer_id: str, query: str, category: str | 
             "WHERE p.restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY p.name LIMIT %s",
             [*values, limit],
         )
-        return _attach_recommendations(cursor, list(cursor.fetchall()))
+        return _mark_products(_attach_recommendations(cursor, list(cursor.fetchall())))
 
 
 def get_product_details(product_id: str) -> dict | None:
@@ -82,7 +83,7 @@ def get_product_details(product_id: str) -> dict | None:
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SELECT p.id, p.name, p.description, p.category, p.price_paise, p.stock, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id WHERE p.id = %s AND p.restricted = FALSE", (product_id,))
         row = cursor.fetchone()
-        return _attach_recommendations(cursor, [row])[0] if row else None
+        return _mark_products(_attach_recommendations(cursor, [row]))[0] if row else None
 
 
 def get_product_details_for_customer(customer_id: str, product_id: str) -> dict | None:
@@ -96,16 +97,29 @@ def get_product_details_for_customer(customer_id: str, product_id: str) -> dict 
             (product_id, list(allowed)),
         )
         row = cursor.fetchone()
-        return _attach_recommendations(cursor, [row])[0] if row else None
+        return _mark_products(_attach_recommendations(cursor, [row]))[0] if row else None
 
 
 def _attach_recommendations(cursor, products: list[dict]) -> list[dict]:
     ids = {related for product in products for related in product.get("related_product_ids", [])}
     if not ids:
         return [{**product, "recommendations": []} for product in products]
-    cursor.execute("SELECT id, name, category, price_paise FROM products WHERE id = ANY(%s) AND restricted = FALSE", (list(ids),))
+    cursor.execute("SELECT p.id, p.name, p.category, p.price_paise, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id WHERE p.id = ANY(%s) AND p.restricted = FALSE", (list(ids),))
     related = {row["id"]: row for row in cursor.fetchall()}
-    return [{**product, "recommendations": [{**related[item], "reason": product.get("recommendation_reason") or "Complements this item."} for item in product.get("related_product_ids", []) if item in related]} for product in products]
+    return [{**product, "recommendations": [{**_offer_fields(related[item], eligible_categories={product.get("category")}), "source": "recommendation", "reason": product.get("recommendation_reason") or "Complements this item."} for item in product.get("related_product_ids", []) if item in related]} for product in products]
+
+
+def _mark_products(products: list[dict]) -> list[dict]:
+    return [{**_offer_fields(product), "source": "search"} for product in products]
+
+
+def _offer_fields(product: dict, *, eligible_categories: set[str] | None = None) -> dict:
+    """Expose only valid demo offer metadata; the product price remains payable authority."""
+    eligibility = product.get("offer_eligibility")
+    valid_until = product.get("offer_valid_until")
+    eligible = eligibility == "All customers" or (eligibility == "With a book" and "books" in (eligible_categories or set()))
+    active = bool(eligible and valid_until and valid_until >= datetime.now(timezone.utc).date() and product.get("list_price_paise", product["price_paise"]) > product["price_paise"] and product.get("savings_paise", 0) == product["list_price_paise"] - product["price_paise"])
+    return {**product, "payable_price_paise": product["price_paise"], "offer_active": active, "savings_paise": product.get("savings_paise", 0) if active else 0}
 
 
 def merchant_catalogue() -> dict:
@@ -113,10 +127,10 @@ def merchant_catalogue() -> dict:
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SELECT p.id, p.name, p.description, p.category, p.price_paise, p.stock, p.restricted, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id ORDER BY p.category, p.name")
         rows = list(cursor.fetchall())
-    products = [{key: value for key, value in row.items() if key != "restricted"} | {"eligible": not row["restricted"]} for row in rows]
+    products = [{**_offer_fields({key: value for key, value in row.items() if key != "restricted"}), "eligible": not row["restricted"], "source": "search"} for row in rows]
     by_id = {product["id"]: product for product in products}
     for product in products:
-        product["related_products"] = [{"id": related, "name": by_id[related]["name"], "category": by_id[related]["category"], "reason": product.get("recommendation_reason") or "Complements this item."} for related in product.get("related_product_ids", []) if related in by_id]
+        product["related_products"] = [{"id": related, "name": by_id[related]["name"], "category": by_id[related]["category"], "source": "recommendation", "reason": product.get("recommendation_reason") or "Complements this item."} for related in product.get("related_product_ids", []) if related in by_id]
     return {"merchant": {"id": os.environ.get("MERCHANT_ID", "merchant_demo"), "name": "Demo Merchant"}, "categories": sorted({p["category"] for p in products}), "products": products, "checkout_requirements": {"mandate": "signed customer mandate", "currency": "INR", "payment": "Razorpay Test Mode", "single_cart": True}}
 
 
@@ -124,11 +138,13 @@ def create_cart(items: list[dict], *, customer_id: str) -> dict:
     """Reload products and create a cart; mandate eligibility is checked later."""
     quantities: dict[str, int] = defaultdict(int)
     for item in items:
-        product_id, quantity = item.get("product_id"), item.get("quantity")
+        product_id, quantity, source = item.get("product_id"), item.get("quantity"), item.get("source")
         if not isinstance(product_id, str) or not product_id:
             raise ValueError("Each item needs a product_id")
         if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
             raise ValueError("Each item needs a positive integer quantity")
+        if source is not None and source not in {"search", "recommendation"}:
+            raise ValueError("Item source must be search or recommendation")
         quantities[product_id] += quantity
     if not quantities:
         raise ValueError("A cart needs at least one item")
@@ -148,10 +164,8 @@ def create_cart(items: list[dict], *, customer_id: str) -> dict:
             if quantity > products[product_id]["stock"]:
                 raise ValueError(f"Insufficient stock for {product_id}")
 
-        cart_items = [
-            {"product_id": product_id, "quantity": quantity}
-            for product_id, quantity in quantities.items()
-        ]
+        sources = {item["product_id"]: item.get("source") for item in items if item.get("source")}
+        cart_items = [{"product_id": product_id, "quantity": quantity, **({"source": sources[product_id]} if product_id in sources else {})} for product_id, quantity in quantities.items()]
         total_paise = sum(
             products[product_id]["price_paise"] * quantity
             for product_id, quantity in quantities.items()

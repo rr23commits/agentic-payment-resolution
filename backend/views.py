@@ -181,13 +181,15 @@ def merchant_metrics() -> dict:
         carts = cursor.fetchone()["carts"]
         cursor.execute("SELECT COUNT(*) AS checkout, COUNT(*) FILTER (WHERE ci.status = 'CAPTURED') AS captured, COALESCE(AVG(c.total_paise) FILTER (WHERE ci.status = 'CAPTURED'), 0) AS aov, COALESCE(SUM(c.total_paise) FILTER (WHERE ci.status = 'CAPTURED'), 0) AS revenue FROM checkout_intents ci JOIN carts c ON c.id = ci.cart_id")
         checkout = cursor.fetchone()
-        cursor.execute("SELECT COUNT(*) AS accepted FROM carts WHERE jsonb_array_length(items_json) > 1")
+        cursor.execute("SELECT COUNT(*) AS accepted FROM carts WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(items_json) AS item WHERE item->>'source' = 'recommendation')")
         accepted = cursor.fetchone()["accepted"]
+        cursor.execute("SELECT COALESCE(SUM(p.price_paise * (item->>'quantity')::BIGINT), 0) AS revenue FROM checkout_intents ci JOIN carts c ON c.id = ci.cart_id CROSS JOIN LATERAL jsonb_array_elements(c.items_json) AS item JOIN products p ON p.id = item->>'product_id' WHERE ci.status = 'CAPTURED' AND item->>'source' = 'recommendation'")
+        recommendation_revenue = cursor.fetchone()["revenue"]
         cursor.execute("SELECT COUNT(*) AS prevented FROM audit_events WHERE type = 'CHECKOUT_BLOCKED' OR (type = 'RESOLUTION_EXCEPTION' AND payload_json->>'reason' ILIKE '%unresolved%')")
         prevented = cursor.fetchone()["prevented"]
         cursor.execute("SELECT COUNT(*) AS resolved FROM audit_events WHERE type = 'ATTEMPT_RESOLVED' AND payload_json->>'previous_status' IN ('PENDING', 'AMBIGUOUS')")
         resolved = cursor.fetchone()["resolved"]
-    return {"requests": requests, "recommendations_accepted": accepted, "carts": carts, "checkout_conversion": round(checkout["captured"] / carts, 3) if carts else 0, "average_order_value_paise": round(checkout["aov"]), "cross_sell_attachment_rate": round(accepted / carts, 3) if carts else 0, "captured_revenue_paise": checkout["revenue"], "duplicate_charges_prevented": prevented, "ambiguous_payments_resolved": resolved}
+    return {"requests": requests, "recommendations_accepted": accepted, "recommendation_revenue_paise": recommendation_revenue, "carts": carts, "checkout_conversion": round(checkout["captured"] / carts, 3) if carts else 0, "average_order_value_paise": round(checkout["aov"]), "cross_sell_attachment_rate": round(accepted / carts, 3) if carts else 0, "captured_revenue_paise": checkout["revenue"], "duplicate_charges_prevented": prevented, "ambiguous_payments_resolved": resolved}
 
 
 def _safe_event(event: dict) -> dict:

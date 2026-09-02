@@ -82,8 +82,9 @@ function productCard(product) {
   const card = document.createElement("label"); card.className = "product-card";
   const top = document.createElement("span"); top.className = "product-card-top";
   const name = document.createElement("strong"); name.textContent = product.name;
-  const price = document.createElement("b"); price.textContent = money(product.price_paise); top.append(name, price);
-  const description = document.createElement("small"); description.className = "product-card-description"; description.textContent = product.description || product.category;
+  const price = document.createElement("b"); price.textContent = money(product.payable_price_paise ?? product.price_paise); top.append(name, price);
+  const description = document.createElement("small"); description.className = "product-card-description"; description.textContent = product.source === "recommendation" ? `Recommendation: ${product.reason || product.recommendation_reason || "Complements this item."}` : product.description || product.category;
+  if (product.offer_active) { const offer = document.createElement("small"); offer.className = "product-card-description"; offer.textContent = `${product.offer_label || "Offer"}: save ${money(product.savings_paise)} (list ${money(product.list_price_paise)}; ${product.offer_eligibility})`; description.after(offer); }
   const bottom = document.createElement("span"); bottom.className = "product-card-bottom";
   const input = document.createElement("input"); input.type = "checkbox"; input.checked = selected.some(({id}) => id === product.id);
   input.onchange = () => {
@@ -93,8 +94,8 @@ function productCard(product) {
     renderProducts();
   };
   const quantity = document.createElement("input"); quantity.type = "number"; quantity.min = "1"; quantity.max = "1000"; quantity.value = selected.find(({id}) => id === product.id)?.quantity || requestedQuantities[product.category] || 1; quantity.setAttribute("aria-label", `Quantity of ${product.name}`);
-  const total = document.createElement("span"); total.className = "product-card-total"; total.textContent = money(product.price_paise * Number(quantity.value));
-  quantity.onchange = () => { const item = selected.find(({id}) => id === product.id); if (item) item.quantity = Math.max(1, Number(quantity.value) || 1); cart = undefined; $("chat-status").textContent = ""; renderCart(); total.textContent = money(product.price_paise * Number(quantity.value)); };
+  const total = document.createElement("span"); total.className = "product-card-total"; total.textContent = money((product.payable_price_paise ?? product.price_paise) * Number(quantity.value));
+  quantity.onchange = () => { const item = selected.find(({id}) => id === product.id); if (item) item.quantity = Math.max(1, Number(quantity.value) || 1); cart = undefined; $("chat-status").textContent = ""; renderCart(); total.textContent = money((product.payable_price_paise ?? product.price_paise) * Number(quantity.value)); };
   bottom.append(input, quantity, total); card.append(top, description, bottom); return card;
 }
 
@@ -155,7 +156,7 @@ function renderAgentTrace(history = agentHistory, extra = []) {
 async function reviewCart() {
   if (!selected.length || !mandate) return;
   const response = await fetch("/api/customer/cart", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
-    mandate_id: mandate.id, items: selected.map(({id, quantity = 1}) => ({product_id: id, quantity})),
+    mandate_id: mandate.id, items: selected.map(({id, quantity = 1, source = "search"}) => ({product_id: id, quantity, source})),
   })});
   cart = await response.json();
   if (!response.ok) {
@@ -172,7 +173,7 @@ async function reviewCart() {
 function renderCart() {
   const hasCart = Boolean(cart?.cart_id);
   $("cart-empty").classList.toggle("hidden", hasCart);
-  $("cart-items").replaceChildren(...(hasCart ? selected.map((product) => { const row = document.createElement("div"); row.className = "cart-row"; const name = document.createElement("span"); name.textContent = `${product.name} × ${product.quantity || 1}`; const price = document.createElement("strong"); price.textContent = money(product.price_paise * (product.quantity || 1)); row.append(name, price); return row; }) : []));
+  $("cart-items").replaceChildren(...(hasCart ? selected.map((product) => { const row = document.createElement("div"); row.className = "cart-row"; const name = document.createElement("span"); name.textContent = `${product.name} × ${product.quantity || 1}`; const price = document.createElement("strong"); price.textContent = money((product.payable_price_paise ?? product.price_paise) * (product.quantity || 1)); row.append(name, price); return row; }) : []));
   const count = hasCart ? selected.reduce((total, product) => total + (product.quantity || 1), 0) : 0; $("cart-count").textContent = hasCart ? `(${count})` : ""; $("cart-count-label").textContent = hasCart ? `${count} item${count === 1 ? "" : "s"}` : ""; $("shop-cart-summary").textContent = hasCart ? `${count} · ${money(cart.cart_total_paise)}` : "";
   if (!hasCart) {
     $("cart-total").textContent = "—"; $("cart-mandate").textContent = "—"; $("cart-status").textContent = "";

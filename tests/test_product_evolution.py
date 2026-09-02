@@ -6,6 +6,7 @@ from unittest.mock import patch
 from backend.catalogue import create_cart, increase_mandate, merchant_catalogue, search_catalogue, update_mandate, validate_purchase
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
+from backend.resolver import _provider_evidence, resolve_attempt
 from backend.seed import main as seed
 from backend.views import merchant_metrics
 
@@ -25,8 +26,51 @@ class ProductEvolutionTests(unittest.TestCase):
     def test_catalogue_includes_savings_and_explicit_recommendation_reason(self):
         book = next(product for product in search_catalogue("book") if product["id"] == "product_demo_book")
         self.assertEqual(book["savings_paise"], 5000)
+        self.assertTrue(book["offer_active"])
+        self.assertEqual(book["payable_price_paise"], 40000)
         self.assertEqual(book["recommendations"][0]["id"], "product_demo_notebook")
+        self.assertEqual(book["recommendations"][0]["source"], "recommendation")
         self.assertTrue(book["recommendations"][0]["reason"])
+
+    def test_cart_preserves_explicit_recommendation_attribution(self):
+        cart = create_cart([{"product_id": "product_demo_notebook", "quantity": 1, "source": "recommendation"}], customer_id="customer_demo")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT items_json FROM carts WHERE id = %s", (cart["cart_id"],))
+            self.assertEqual(cursor.fetchone()[0][0]["source"], "recommendation")
+
+    def test_metrics_ignore_unattributed_multi_item_carts(self):
+        create_cart([{"product_id": "product_demo_book", "quantity": 1}, {"product_id": "product_demo_notebook", "quantity": 1}], customer_id="customer_demo")
+        self.assertEqual(merchant_metrics()["recommendations_accepted"], 0)
+
+    @patch("backend.checkout.create_order", return_value="order_metric_mix")
+    def test_recommendation_revenue_is_only_recommendation_item_revenue(self, _create_order):
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("INSERT INTO products VALUES ('metric_search', 'Search item', 'Search item', 'books', 40000, 2, FALSE), ('metric_recommendation', 'Recommended item', 'Recommended item', 'books', 10000, 2, FALSE)")
+        cart = create_cart([
+            {"product_id": "metric_search", "quantity": 1, "source": "search"},
+            {"product_id": "metric_recommendation", "quantity": 1, "source": "recommendation"},
+        ], customer_id="customer_demo")
+        checkout = start_checkout(cart["cart_id"], "mandate_demo_valid", "metric-mixed", customer_id="customer_demo")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (checkout["intent_id"],))
+            attempt_id = cursor.fetchone()[0]
+        resolve_attempt(attempt_id, _provider_evidence("RAZORPAY_WEBHOOK", order_id="order_metric_mix", payment_id="pay_metric_mix", status="captured"))
+        metrics = merchant_metrics()
+        self.assertEqual(metrics["captured_revenue_paise"], 50000)
+        self.assertEqual(metrics["recommendation_revenue_paise"], 10000)
+
+        create_cart([{"product_id": "metric_search", "quantity": 1, "source": "search"}], customer_id="customer_demo")
+        self.assertEqual(merchant_metrics()["recommendation_revenue_paise"], 10000)
+
+    @patch("backend.checkout.create_order", return_value="order_offer_authoritative")
+    def test_offer_display_price_cannot_change_authoritative_checkout_total(self, create_order):
+        book = next(product for product in search_catalogue("book") if product["id"] == "product_demo_book")
+        self.assertEqual((book["list_price_paise"] - book["savings_paise"]), book["payable_price_paise"])
+        cart = create_cart([{"product_id": book["id"], "quantity": 1, "price_paise": 1}], customer_id="customer_demo")
+        self.assertEqual(cart["total_paise"], book["payable_price_paise"])
+        checkout = start_checkout(cart["cart_id"], "mandate_demo_valid", "offer-authoritative", customer_id="customer_demo")
+        self.assertTrue(checkout["allowed"])
+        create_order.assert_called_once_with(book["payable_price_paise"], checkout["intent_id"])
 
     def test_ai_catalogue_is_safe_and_read_only(self):
         catalogue = merchant_catalogue()
