@@ -7,7 +7,7 @@ from psycopg.types.json import Jsonb
 
 from agent.tools import TOOL_DEFINITIONS, tools_for
 from agent.loop import run_agent
-from backend.catalogue import create_cart, mandate_token
+from backend.catalogue import create_cart, get_product_details, mandate_token, search_catalogue, update_mandate, validate_purchase
 from backend.db import connect, migrate
 
 
@@ -59,13 +59,17 @@ class AgentToolTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("Cart does not belong to this customer", result["reasons"])
 
-    def test_search_is_filtered_by_active_mandate_and_updates_with_revision(self) -> None:
+    def test_out_of_category_product_is_allowed_within_spending_mandate(self) -> None:
+        cart = self.tools.create_cart([{"product_id": "product_pants", "quantity": 1}])
+        self.assertTrue(self.tools.validate_purchase(cart["cart_id"], "mandate_agent")["allowed"])
+
+    def test_search_and_details_do_not_apply_mandate_categories(self) -> None:
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("Book")], ["books"])
-        self.assertEqual(self.tools.search_catalogue("Cotton", category="tshirts"), [])
-        expires_at = datetime.now(timezone.utc) + timedelta(days=2)
-        from backend.catalogue import update_mandate
-        update_mandate("customer_agent", 100000, ["books", "tshirts", "pants"], expires_at, request_id="agent-mandate-edit")
-        self.assertEqual({item["category"] for category in ("books", "tshirts", "pants") for item in self.tools.search_catalogue("Book" if category == "books" else "Cotton", category=category)}, {"books", "tshirts", "pants"})
+        self.assertEqual([item["category"] for item in self.tools.search_catalogue("books")], ["books"])
+        self.assertEqual([item["category"] for item in self.tools.search_catalogue("books", category="books")], ["books"])
+        self.assertEqual([item["category"] for item in self.tools.search_catalogue("Cotton", category="tshirts")], ["tshirts"])
+        self.assertEqual(self.tools.get_product_details("product_shirt")["category"], "tshirts")
+        self.assertEqual(get_product_details("product_shirt")["category"], "tshirts")
         self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, {"tshirts"})
 
     def test_natural_tshirt_search_forms_use_the_allowed_category(self) -> None:
@@ -80,13 +84,11 @@ class AgentToolTests(unittest.TestCase):
                 self.assertEqual({item["id"] for item in self.tools.search_catalogue(query)}, expected)
         self.assertEqual({item["id"] for item in self.tools.search_catalogue("T-Shirts", category="T-Shirts")}, expected)
 
-    def test_agent_cannot_mutate_mandate_or_bypass_category_filter(self) -> None:
+    def test_agent_cannot_mutate_mandate(self) -> None:
         self.assertFalse(hasattr(self.tools, "update_mandate"))
         self.assertFalse(hasattr(self.tools, "increase_mandate"))
-        self.assertIsNone(self.tools.get_product_details("product_shirt"))
 
-    def test_mixed_request_keeps_allowed_results_and_explains_excluded_category(self) -> None:
-        from backend.catalogue import update_mandate
+    def test_mixed_request_returns_products_before_mandate_validation(self) -> None:
         update_mandate(
             "customer_agent", 100000, ["tshirts", "pants"],
             datetime.now(timezone.utc) + timedelta(days=2), request_id="mixed-mandate",
@@ -106,7 +108,7 @@ class AgentToolTests(unittest.TestCase):
 
         result = run_agent("I want 2 tshirts and 3 books", customer_id="customer_agent", model=model)
         searches = [entry["result"] for entry in result["history"] if entry.get("tool") == "search_catalogue"]
-        self.assertEqual({product["category"] for products in searches for product in products}, {"tshirts"})
+        self.assertEqual({product["category"] for products in searches for product in products}, {"books", "tshirts"})
         self.assertEqual([product["id"] for product in searches[0]], ["product_shirt"])
         self.assertIn("Books", result["message"])
         self.assertIn("outside", result["message"])

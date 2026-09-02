@@ -13,11 +13,11 @@ from urllib.parse import parse_qs, urlparse
 from agent.loop import run_agent
 from agent.gemini import gemini_first_model
 from backend.browser_checkout import record_client_cancellation, record_client_payment_reference, record_client_timeout
-from backend.catalogue import create_cart, get_mandate, increase_mandate, update_mandate, validate_purchase
+from backend.catalogue import create_cart, get_mandate, increase_mandate, merchant_catalogue, update_mandate, validate_purchase
 from backend.checkout import start_checkout
 from backend.resolver import reconcile_status
 from backend.razorpay import RazorpayError
-from backend.views import customer_intent, customer_transactions, operator_intent, operator_transactions
+from backend.views import customer_intent, customer_transactions, merchant_metrics, operator_intent, operator_transactions
 from backend.webhooks import ingest_webhook
 
 
@@ -45,6 +45,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/customer/mandate":
             self._json(HTTPStatus.OK, get_mandate(DEMO_CUSTOMER_ID) or {"found": False})
+            return
+        if parsed.path == "/api/merchant/catalog":
+            self._json(HTTPStatus.OK, merchant_catalogue())
+            return
+        if parsed.path == "/api/operator/metrics":
+            if not self._operator_authorized():
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            self._json(HTTPStatus.OK, merchant_metrics())
             return
         if parsed.path == "/api/operator/intent":
             if not self._operator_authorized():

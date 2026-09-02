@@ -125,13 +125,35 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertIn("await reviewCart();", source)
         self.assertIn('$("launch").hidden = !cart.allowed', source)
         self.assertIn("window.openRazorpayCheckout(result)", source)
-        self.assertIn('result.status === "AMBIGUOUS" ? result.message', source)
-        self.assertIn(' : "Checkout ready"', source)
+        self.assertIn('const unresolved = activePayment.has(result.status)', source)
+        self.assertIn('Payment is still being confirmed. Do not retry.', source)
+        self.assertIn('result.status === "FAILED" ? "You may try checkout again."', source)
+        self.assertIn('"ABANDONED"]', source)
         self.assertIn("if (result.checkout?.intent_id)", source)
         self.assertIn("const persisted = await loadIntent(result.checkout.intent_id)", source)
         self.assertIn('persisted?.status === "PENDING" && !persisted.payment_id', source)
         self.assertIn("window.openRazorpayCheckout(persisted.checkout)", source)
         self.assertIn("extractRequestedQuantities", source)
+        self.assertIn('fetch("/api/merchant/catalog")', source)
+        self.assertIn("loadCatalogue();", source)
+        self.assertIn("Customer selection received", source)
+        self.assertIn("let catalogueProducts = [];", source)
+        self.assertIn("let displayedProducts = [];", source)
+        self.assertIn("let displayedRecommendations = [];", source)
+        self.assertIn('function productCard(product)', source)
+        self.assertIn('const price = document.createElement("b"); price.textContent = money(product.price_paise)', source)
+        self.assertIn('description.textContent = product.description || product.category', source)
+        self.assertIn('items: selected.map(({id, quantity = 1}) => ({product_id: id, quantity}))', source)
+        self.assertIn('renderCategoryPicker(mandate?.allowed_categories_json || [], displayedRecommendations.map(({category}) => category))', source)
+        self.assertNotIn('$("category-picker").open = true', source)
+        self.assertIn('function renderCategoryPicker(selectedCategories = [], extraCategories = [])', source)
+        self.assertIn('...selectedCategories, ...extraCategories', source)
+        self.assertNotIn("displayedProducts = catalogueProducts", source)
+        self.assertIn("...(product.recommendations || [])", source)
+        self.assertIn("displayedRecommendations.map(productCard)", source)
+        self.assertIn("displayedProducts = [...new Map(searchResults", source)
+        self.assertIn("displayedRecommendations = [...new Map(catalogueResults", source)
+        self.assertNotIn("selected = []; renderProducts();", source)
         self.assertIn('t[\\s-]?shirts?', source)
         self.assertIn('catalogueCategoryAliases', source)
         with open("frontend/app.js", encoding="utf-8") as file:
@@ -143,7 +165,9 @@ class CustomerChatEndpointTests(unittest.TestCase):
         with open("frontend/index.html", encoding="utf-8") as file:
             markup = file.read()
         self.assertIn("Payment protection — An unresolved payment is never automatically retried.", markup)
-        self.assertIn("Controlled demo · single customer session", markup)
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            customer_source = file.read()
+        self.assertIn("Demo environment · Single customer session", customer_source)
         self.assertIn(">Customer</span>", markup)
         self.assertNotIn('aria-label="Help"', markup)
         self.assertNotIn('aria-label="Settings"', markup)
@@ -162,6 +186,92 @@ class CustomerChatEndpointTests(unittest.TestCase):
         script = aliases + "\n" + source[start:end] + "\nconsole.log(JSON.stringify(extractRequestedQuantities('2 T-Shirts and 3 pants')));"
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(result.stdout), {"tshirts": 2, "pants": 3})
+
+    def test_out_of_stock_recommendation_is_removed_before_retrying_cart(self) -> None:
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            source = file.read()
+        start = source.index("async function reviewCart")
+        end = source.index("\n}\n\nfunction renderCart", start) + 2
+        script = """
+let mandate = {id: "mandate_demo"};
+let selected = [
+  {id: "product_demo_tshirt_blue", category: "tshirts", quantity: 2},
+  {id: "product_demo_book", category: "books", quantity: 3},
+  {id: "product_demo_tshirt_cap", category: "accessories", quantity: 1}
+];
+let displayedRecommendations = [{id: "product_demo_tshirt_cap", name: "Canvas Cap"}];
+let cart;
+let agentHistory = [];
+const nodes = {"chat-status": {textContent: ""}};
+const $ = (id) => nodes[id];
+const renderProducts = () => {};
+const renderCart = () => {};
+const renderAgentTrace = () => {};
+const nav = () => {};
+let calls = [];
+const fetch = async (_url, options) => {
+  calls.push(JSON.parse(options.body));
+  return calls.length === 1
+    ? {ok: false, json: async () => ({error: "Insufficient stock for product_demo_tshirt_cap"})}
+    : {ok: true, json: async () => ({cart_id: "cart_valid", cart_total_paise: 129800, allowed: true})};
+};
+""" + source[start:end] + "\n" + "(async () => { await reviewCart(); const afterFailure = selected.map(({id, quantity}) => ({id, quantity})); await reviewCart(); console.log(JSON.stringify({afterFailure, retry: calls[1].items, cart})); })();"
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {
+            "afterFailure": [
+                {"id": "product_demo_tshirt_blue", "quantity": 2},
+                {"id": "product_demo_book", "quantity": 3},
+            ],
+            "retry": [
+                {"product_id": "product_demo_tshirt_blue", "quantity": 2},
+                {"product_id": "product_demo_book", "quantity": 3},
+            ],
+            "cart": {"cart_id": "cart_valid", "cart_total_paise": 129800, "allowed": True},
+        })
+
+    def test_unresolved_payment_hides_checkout_but_failed_payment_allows_retry(self) -> None:
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            source = file.read()
+        start = source.index("function renderPayment")
+        end = source.index("\n}\n\nasync function loadIntent", start) + 2
+        script = """
+const nodes = Object.fromEntries(["payment-panel", "payment-title", "payment-copy", "payment-alert", "checkout-step", "submitted-step", "confirm-step", "order-id", "payment-id", "view-transaction", "launch"].map((id) => [id, {hidden: false, className: "", textContent: "", classList: {add() {}, remove() {}, toggle() {}}}]));
+const $ = (id) => nodes[id];
+const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS", "ABANDONED"]);
+const finalPayment = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED"]);
+let activePaymentStatus;
+let agentHistory = [];
+let poll;
+let cart = {allowed: true};
+const clearInterval = () => {};
+const setInterval = () => 1;
+const renderAgentTrace = () => {};
+const nav = () => {};
+const loadIntent = () => {};
+""" + source[start:end] + '\n' + 'renderPayment({status: "PENDING", message: "Payment is still being confirmed. Do not retry."}); const pendingHidden = nodes.launch.hidden; renderPayment({status: "FAILED", payment_id: "pay_failed", message: "Payment failed; you may try again."}); console.log(JSON.stringify({pendingHidden, failedTitle: nodes["payment-title"].textContent, failedHidden: nodes.launch.hidden}));'
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {
+            "pendingHidden": True,
+            "failedTitle": "Payment failed; you may try again.",
+            "failedHidden": False,
+        })
+
+    def test_recommendation_category_is_rendered_unchecked(self) -> None:
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            source = file.read()
+        start = source.index("function renderCategoryPicker")
+        end = source.index("\n}\n\nfunction updateCategorySummary", start) + 2
+        summary_start = source.index("function updateCategorySummary")
+        summary_end = source.index("\n}\n\nasync function loadMandate", summary_start) + 2
+        script = """
+const nodes = {\"category-options\": {replaceChildren(...children) { this.children = children; }}, \"category-summary\": {replaceChildren(...children) { this.children = children; }}};
+const document = {createElement: () => ({append(...children) { this.children = children; }}), createTextNode: (text) => ({textContent: text}), querySelectorAll: () => []};
+const $ = (id) => nodes[id];
+""" + source[start:end] + "\n" + source[summary_start:summary_end] + "\nrenderCategoryPicker([\"books\"], [\"accessories\"]); console.log(JSON.stringify(nodes[\"category-options\"].children.map((label) => ({category: label.children[1].textContent, checked: label.children[0].checked}))));"
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        options = json.loads(result.stdout)
+        accessories = next(option for option in options if option["category"] == "accessories")
+        self.assertFalse(accessories["checked"])
 
     @patch("backend.main.reconcile_status", return_value={"status": "CAPTURED"})
     def test_operator_reconcile_uses_attempt_id(self, reconcile) -> None:

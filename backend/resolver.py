@@ -81,7 +81,7 @@ def _resolve_attempt(cursor, attempt_id: str, evidence: dict) -> dict:
         attempt_id=attempt_id,
         event_type="ATTEMPT_RESOLVED",
         evidence_source=evidence["source"],
-        payload={"status": target, "reason": reason,
+        payload={"status": target, "previous_status": attempt["status"], "reason": reason,
                  "provider_event": evidence.get("event"),
                  "provider_status": evidence.get("status") or (evidence.get("event") or "").removeprefix("payment."),
                  "matched_order_id": evidence.get("order_id"),

@@ -1,6 +1,6 @@
 # Agentic Checkout with Authoritative Payment Resolution
 
-Razorpay Test Mode checkout prototype with PostgreSQL-backed catalogue, mandate validation, idempotent checkout, browser correlation, verified resolution, agent loop, and customer/operator views.
+An AI-ready merchant storefront that converts natural-language intent into safe Razorpay Test Mode transactions. Payment resolution remains the differentiator: catalogue recommendations and offers lead to one server-authoritative cart and one protected checkout.
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ uv run python -m backend.main
 
 The schema uses integer paise (`BIGINT`) for every amount. It enforces checkout idempotency, one unresolved attempt per intent, webhook deduplication, ordered audit sequences, and append-only audit records at the database boundary. `make dev` runs the migration and idempotent demo seed automatically.
 
-The seed creates `customer_demo` with a demo book and valid, cap-failing, category-failing, and expired mandates. The customer surface is a controlled single-user demo bound to `customer_demo`, not authenticated multi-user application functionality, and must not be exposed publicly as production software. After creating a checkout, the customer page has a labelled demo timeout/debit action. To replay a signed webhook through the real HTTP boundary for backup/testing, run `uv run python -m backend.demo --order-id ORDER_ID --delay 5`.
+The seed creates around ten products across books, clothing, accessories, and other categories, with related-product recommendations, three simple offers, an out-of-stock item, and an eligibility-restricted item. The customer surface is a controlled single-user demo bound to `customer_demo`, not authenticated multi-user application functionality. `GET /api/merchant/catalog` is a safe read-only catalogue for AI buyers; the operator view adds compact growth metrics. After creating a checkout, the customer page has a labelled demo timeout/debit action. To replay a signed webhook through the real HTTP boundary for backup/testing, run `uv run python -m backend.demo --order-id ORDER_ID --delay 5`.
 
 ## Phase 2 tools
 

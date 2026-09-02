@@ -8,6 +8,8 @@ Do **not** present that repository as a live payment-resolution system. Its life
 
 ## Product promise
 
+This is an AI-ready merchant storefront: natural-language intent becomes an explicitly selected, server-priced cart and one safe Razorpay transaction. Payment resolution remains the key differentiator.
+
 When a customer asks the agent to buy an eligible item, the agent can create one checkout attempt. If the account is debited but the merchant does not yet have a final result, it says:
 
 > “Your payment is still being confirmed. I will not start another payment while this one is unresolved.”
@@ -18,13 +20,15 @@ It confirms an order only after an authoritative terminal result. It records eve
 
 ### In scope
 
-- Small product catalogue and natural-language shopping request.
+- Merchant catalogue with lightweight related products and savings offers.
+- Natural-language shopping request with explicit add-on selection.
 - Signed mandate: merchant, allowed categories, spending cap, expiry, and agent ID.
 - Razorpay Test Mode order/checkout creation.
 - Verified Razorpay webhook ingestion and provider status reconciliation.
 - Per-attempt state machine for `PENDING`, `AMBIGUOUS`, `CAPTURED`, `FAILED`, and `REVERSED`/`REFUNDED` where supported by the available provider evidence.
 - Durable idempotency and audit records.
 - Minimal customer status page and operator timeline.
+- Read-only AI catalogue projection and compact merchant-growth metrics.
 - A deterministic demo harness that delays a local webhook-processing step; it must be visibly labelled as a demo harness, not a bank/payment simulation.
 
 ### Deliberately out of scope

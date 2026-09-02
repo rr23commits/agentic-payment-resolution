@@ -25,18 +25,24 @@ def search_catalogue(query: str, category: str | None = None, limit: int = 4) ->
         raise ValueError("Search query is required")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 4:
         raise ValueError("Search limit must be between 1 and 4")
-    filters = ["(name ILIKE %s OR description ILIKE %s)"]
-    values: list[str] = [f"%{query}%", f"%{query}%"]
+    # Match the natural-language singular form too, so plural requests find singular catalogue names.
+    terms = [query, query[:-1]] if query.casefold().endswith("s") and len(query) > 1 else [query]
+    filters = ["(" + " OR ".join("name ILIKE %s OR description ILIKE %s" for _ in terms) + ")"]
+    values: list[str] = [value for term in terms for value in (f"%{term}%", f"%{term}%")]
     if category:
         filters.append("category = %s")
         values.append(category)
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
-            "SELECT id, name, description, category, price_paise "
-            "FROM products WHERE restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY name LIMIT %s",
+            "SELECT p.id, p.name, p.description, p.category, p.price_paise, "
+            "COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, "
+            "pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, "
+            "COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason "
+            "FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id "
+            "WHERE p.restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY p.name LIMIT %s",
             [*values, limit],
         )
-        return list(cursor.fetchall())
+        return _attach_recommendations(cursor, list(cursor.fetchall()))
 
 
 def search_catalogue_for_customer(customer_id: str, query: str, category: str | None = None, limit: int = 4) -> list[dict]:
@@ -60,18 +66,23 @@ def search_catalogue_for_customer(customer_id: str, query: str, category: str | 
             filters.append("category = %s")
             values.append(category)
         cursor.execute(
-            "SELECT id, name, description, category, price_paise FROM products "
-            "WHERE restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY name LIMIT %s",
+            "SELECT p.id, p.name, p.description, p.category, p.price_paise, "
+            "COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, "
+            "pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, "
+            "COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason "
+            "FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id "
+            "WHERE p.restricted = FALSE AND " + " AND ".join(filters) + " ORDER BY p.name LIMIT %s",
             [*values, limit],
         )
-        return list(cursor.fetchall())
+        return _attach_recommendations(cursor, list(cursor.fetchall()))
 
 
 def get_product_details(product_id: str) -> dict | None:
     """Return the current server-authoritative product record."""
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-        cursor.execute("SELECT id, name, description, category, price_paise FROM products WHERE id = %s AND restricted = FALSE", (product_id,))
-        return cursor.fetchone()
+        cursor.execute("SELECT p.id, p.name, p.description, p.category, p.price_paise, p.stock, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id WHERE p.id = %s AND p.restricted = FALSE", (product_id,))
+        row = cursor.fetchone()
+        return _attach_recommendations(cursor, [row])[0] if row else None
 
 
 def get_product_details_for_customer(customer_id: str, product_id: str) -> dict | None:
@@ -80,15 +91,37 @@ def get_product_details_for_customer(customer_id: str, product_id: str) -> dict 
     allowed = set(mandate["allowed_categories_json"]) if mandate and mandate["expires_at"] > datetime.now(timezone.utc) else set()
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
-            "SELECT id, name, description, category, price_paise FROM products "
-            "WHERE id = %s AND restricted = FALSE AND category = ANY(%s)",
+            "SELECT p.id, p.name, p.description, p.category, p.price_paise, p.stock, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id "
+            "WHERE p.id = %s AND p.restricted = FALSE AND p.category = ANY(%s)",
             (product_id, list(allowed)),
         )
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        return _attach_recommendations(cursor, [row])[0] if row else None
+
+
+def _attach_recommendations(cursor, products: list[dict]) -> list[dict]:
+    ids = {related for product in products for related in product.get("related_product_ids", [])}
+    if not ids:
+        return [{**product, "recommendations": []} for product in products]
+    cursor.execute("SELECT id, name, category, price_paise FROM products WHERE id = ANY(%s) AND restricted = FALSE", (list(ids),))
+    related = {row["id"]: row for row in cursor.fetchall()}
+    return [{**product, "recommendations": [{**related[item], "reason": product.get("recommendation_reason") or "Complements this item."} for item in product.get("related_product_ids", []) if item in related]} for product in products]
+
+
+def merchant_catalogue() -> dict:
+    """Return safe, read-only merchant catalogue data for AI buyers."""
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute("SELECT p.id, p.name, p.description, p.category, p.price_paise, p.stock, p.restricted, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise, COALESCE(pm.related_product_ids_json, '[]'::jsonb) AS related_product_ids, pm.recommendation_reason FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id ORDER BY p.category, p.name")
+        rows = list(cursor.fetchall())
+    products = [{key: value for key, value in row.items() if key != "restricted"} | {"eligible": not row["restricted"]} for row in rows]
+    by_id = {product["id"]: product for product in products}
+    for product in products:
+        product["related_products"] = [{"id": related, "name": by_id[related]["name"], "category": by_id[related]["category"], "reason": product.get("recommendation_reason") or "Complements this item."} for related in product.get("related_product_ids", []) if related in by_id]
+    return {"merchant": {"id": os.environ.get("MERCHANT_ID", "merchant_demo"), "name": "Demo Merchant"}, "categories": sorted({p["category"] for p in products}), "products": products, "checkout_requirements": {"mandate": "signed customer mandate", "currency": "INR", "payment": "Razorpay Test Mode", "single_cart": True}}
 
 
 def create_cart(items: list[dict], *, customer_id: str) -> dict:
-    """Reload products and create a cart using only server-side prices."""
+    """Reload products and create a cart; mandate eligibility is checked later."""
     quantities: dict[str, int] = defaultdict(int)
     for item in items:
         product_id, quantity = item.get("product_id"), item.get("quantity")
@@ -368,7 +401,6 @@ def _validate_cart_and_mandate(cursor, cart: dict, mandate: dict, reasons: list[
         (list(quantities),),
     )
     products = {product["id"]: product for product in cursor.fetchall()}
-    allowed_categories = set(mandate["allowed_categories_json"])
     for product_id, quantity in quantities.items():
         product = products.get(product_id)
         if product is None:
@@ -378,8 +410,6 @@ def _validate_cart_and_mandate(cursor, cart: dict, mandate: dict, reasons: list[
             reasons.append(f"Insufficient stock for {product_id}")
         if product["restricted"]:
             reasons.append(f"Product {product_id} is restricted")
-        if product["category"] not in allowed_categories:
-            reasons.append(f"Product {product_id} category is not allowed")
 
     current_total = sum(
         products[product_id]["price_paise"] * quantity

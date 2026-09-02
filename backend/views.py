@@ -10,7 +10,7 @@ from backend.db import connect
 MESSAGES = {
     "PENDING": "Payment is being confirmed. Do not retry.",
     "AMBIGUOUS": "Payment is still being confirmed. Do not retry.",
-    "ABANDONED": "Checkout was cancelled; you may try again.",
+    "ABANDONED": "Payment is still being confirmed. Do not retry.",
     "CAPTURED": "Payment confirmed.",
     "FAILED": "Payment failed; you may try again.",
     "REVERSED": "Payment was reversed.",
@@ -32,7 +32,7 @@ def customer_intent(intent_id: str, customer_id: str | None = None) -> dict:
         products = {}
         if intent:
             product_ids = [item.get("product_id") for item in items if isinstance(item, dict) and item.get("product_id")]
-            cursor.execute("SELECT id, name, category, price_paise FROM products WHERE id = ANY(%s)", (product_ids,))
+            cursor.execute("SELECT p.id, p.name, p.category, p.price_paise, COALESCE(pm.list_price_paise, p.price_paise) AS list_price_paise, pm.offer_label, pm.offer_eligibility, pm.offer_valid_until, COALESCE(pm.savings_paise, 0) AS savings_paise FROM products p LEFT JOIN product_metadata pm ON pm.product_id = p.id WHERE p.id = ANY(%s)", (product_ids,))
             products = {product["id"]: product for product in cursor.fetchall()}
             cursor.execute(
                 "SELECT sequence, type, evidence_source, payload_json, created_at FROM audit_events "
@@ -170,6 +170,24 @@ def operator_transactions(query: str = "") -> dict:
          "payment_id": row["razorpay_payment_id"], "amount_paise": row["total_paise"]}
         for row in rows
     ]}
+
+
+def merchant_metrics() -> dict:
+    """Compact growth metrics derived from existing requests, carts, and attempts."""
+    with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute("SELECT COUNT(*) AS requests FROM audit_events WHERE type = 'CUSTOMER_MESSAGE' AND actor = 'AGENT'")
+        requests = cursor.fetchone()["requests"]
+        cursor.execute("SELECT COUNT(*) AS carts FROM carts")
+        carts = cursor.fetchone()["carts"]
+        cursor.execute("SELECT COUNT(*) AS checkout, COUNT(*) FILTER (WHERE ci.status = 'CAPTURED') AS captured, COALESCE(AVG(c.total_paise) FILTER (WHERE ci.status = 'CAPTURED'), 0) AS aov, COALESCE(SUM(c.total_paise) FILTER (WHERE ci.status = 'CAPTURED'), 0) AS revenue FROM checkout_intents ci JOIN carts c ON c.id = ci.cart_id")
+        checkout = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) AS accepted FROM carts WHERE jsonb_array_length(items_json) > 1")
+        accepted = cursor.fetchone()["accepted"]
+        cursor.execute("SELECT COUNT(*) AS prevented FROM audit_events WHERE type = 'CHECKOUT_BLOCKED' OR (type = 'RESOLUTION_EXCEPTION' AND payload_json->>'reason' ILIKE '%unresolved%')")
+        prevented = cursor.fetchone()["prevented"]
+        cursor.execute("SELECT COUNT(*) AS resolved FROM audit_events WHERE type = 'ATTEMPT_RESOLVED' AND payload_json->>'previous_status' IN ('PENDING', 'AMBIGUOUS')")
+        resolved = cursor.fetchone()["resolved"]
+    return {"requests": requests, "recommendations_accepted": accepted, "carts": carts, "checkout_conversion": round(checkout["captured"] / carts, 3) if carts else 0, "average_order_value_paise": round(checkout["aov"]), "cross_sell_attachment_rate": round(accepted / carts, 3) if carts else 0, "captured_revenue_paise": checkout["revenue"], "duplicate_charges_prevented": prevented, "ambiguous_payments_resolved": resolved}
 
 
 def _safe_event(event: dict) -> dict:

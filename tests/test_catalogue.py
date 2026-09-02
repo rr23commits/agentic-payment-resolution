@@ -74,6 +74,7 @@ class CatalogueToolTests(unittest.TestCase):
         self.assertEqual(get_mandate(self.customer_id)["id"], mandate_id)
         products = search_catalogue("book", "books")
         self.assertEqual(len(products), 1)
+        self.assertEqual([product["id"] for product in search_catalogue("books")], ["product_book"])
         self.assertNotIn("stock", products[0])
         self.assertNotIn("restricted", products[0])
         self.assertEqual(get_product_details("product_book")["price_paise"], 40000)
@@ -89,7 +90,6 @@ class CatalogueToolTests(unittest.TestCase):
             audit_count = cursor.fetchone()[0]
         cases = [
             {"cap": 1},
-            {"categories": ["games"]},
             {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)},
             {"token": "not-a-signature"},
         ]
@@ -102,6 +102,16 @@ class CatalogueToolTests(unittest.TestCase):
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM audit_events")
             self.assertEqual(cursor.fetchone()[0], audit_count + len(cases))
+
+    def test_out_of_category_recommendation_is_allowed_within_spending_mandate(self) -> None:
+        mandate_id = self.add_mandate(categories=["books"])
+        cart = create_cart(
+            [{"product_id": "product_game", "quantity": 1}],
+            customer_id=self.customer_id,
+        )
+
+        result = validate_purchase(cart["cart_id"], mandate_id, customer_id=self.customer_id)
+        self.assertTrue(result["allowed"])
 
     def test_concurrent_preintent_audits_have_unique_sequences(self) -> None:
         mandate_id = self.add_mandate()

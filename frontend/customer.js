@@ -1,15 +1,19 @@
 const $ = (id) => document.getElementById(id);
 let mandate;
-let products = [];
+let catalogueProducts = [];
+let displayedProducts = [];
+let displayedRecommendations = [];
 let selected = [];
 let cart;
 let transactions = [];
 let poll;
 let requestedQuantities = {};
+let agentHistory = [];
+let activePaymentStatus;
 
 const money = (paise) => paise == null ? "—" : `₹${(paise / 100).toFixed(2)}`;
 const requestId = () => crypto.randomUUID();
-const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS"]);
+const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS", "ABANDONED"]);
 const finalPayment = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED"]);
 const catalogueCategoryAliases = {tshirt: "tshirts", tshirts: "tshirts", pant: "pants", pants: "pants", book: "books", books: "books"};
 
@@ -34,13 +38,13 @@ function nav(view) {
 function renderMandate() {
   if (!mandate?.id) return;
   $("max-limit").value = mandate.max_amount_paise / 100;
-  renderCategoryPicker(mandate.allowed_categories_json);
+  renderCategoryPicker(mandate.allowed_categories_json, displayedRecommendations.map(({category}) => category));
   $("header-mandate").textContent = money(mandate.max_amount_paise);
   $("chat-submit").disabled = false;
 }
 
-function renderCategoryPicker(selectedCategories = []) {
-  const categories = [...new Set(["books", "tshirts", "pants", ...selectedCategories])];
+function renderCategoryPicker(selectedCategories = [], extraCategories = []) {
+  const categories = [...new Set(["books", "tshirts", "pants", ...selectedCategories, ...extraCategories])];
   const options = $("category-options"); options.replaceChildren(...categories.map((category) => {
     const label = document.createElement("label"); const input = document.createElement("input"); input.type = "checkbox"; input.value = category; input.checked = selectedCategories.includes(category); input.onchange = updateCategorySummary; label.append(input, document.createTextNode(category)); return label;
   })); updateCategorySummary();
@@ -54,6 +58,13 @@ function updateCategorySummary() {
 async function loadMandate() {
   const response = await fetch("/api/customer/mandate");
   if (response.ok) { mandate = await response.json(); renderMandate(); }
+}
+
+async function loadCatalogue() {
+  const response = await fetch("/api/merchant/catalog");
+  if (!response.ok) return;
+  const catalogue = await response.json();
+  catalogueProducts = (catalogue.products || []).filter((product) => product.eligible !== false);
 }
 
 async function saveMandate(event) {
@@ -75,23 +86,38 @@ function productCard(product) {
   const description = document.createElement("small"); description.className = "product-card-description"; description.textContent = product.description || product.category;
   const bottom = document.createElement("span"); bottom.className = "product-card-bottom";
   const input = document.createElement("input"); input.type = "checkbox"; input.checked = selected.some(({id}) => id === product.id);
-  input.onchange = () => { selected = products.filter((item) => item.id === product.id ? input.checked : selected.some(({id}) => id === item.id)); renderProducts(); };
+  input.onchange = () => {
+    if (input.checked && !selected.some(({id}) => id === product.id)) selected = [...selected, {...product, quantity: requestedQuantities[product.category] || 1}];
+    if (!input.checked) selected = selected.filter(({id}) => id !== product.id);
+    cart = undefined; $("chat-status").textContent = ""; renderCart();
+    renderProducts();
+  };
   const quantity = document.createElement("input"); quantity.type = "number"; quantity.min = "1"; quantity.max = "1000"; quantity.value = selected.find(({id}) => id === product.id)?.quantity || requestedQuantities[product.category] || 1; quantity.setAttribute("aria-label", `Quantity of ${product.name}`);
   const total = document.createElement("span"); total.className = "product-card-total"; total.textContent = money(product.price_paise * Number(quantity.value));
-  quantity.onchange = () => { const item = selected.find(({id}) => id === product.id); if (item) item.quantity = Math.max(1, Number(quantity.value) || 1); total.textContent = money(product.price_paise * Number(quantity.value)); };
+  quantity.onchange = () => { const item = selected.find(({id}) => id === product.id); if (item) item.quantity = Math.max(1, Number(quantity.value) || 1); cart = undefined; $("chat-status").textContent = ""; renderCart(); total.textContent = money(product.price_paise * Number(quantity.value)); };
   bottom.append(input, quantity, total); card.append(top, description, bottom); return card;
 }
 
 function renderProducts() {
   const box = $("recommendations"); box.replaceChildren();
   const groups = new Map();
-  products.forEach((product) => groups.set(product.category, [...(groups.get(product.category) || []), product]));
-  if (!products.length) { box.className = "recommendations empty-state"; box.textContent = "Ask the agent to see products."; }
+  displayedProducts.forEach((product) => groups.set(product.category, [...(groups.get(product.category) || []), product]));
+  if (!displayedProducts.length) { box.className = "recommendations empty-state"; box.textContent = "No products are available yet. Browse again or ask the agent for help."; }
   else {
     box.className = "recommendations";
     groups.forEach((items, category) => { const section = document.createElement("section"); const heading = document.createElement("h3"); heading.textContent = category === "tshirts" ? "T-Shirts" : category; section.append(heading, ...items.map(productCard)); box.append(section); });
+    if (displayedRecommendations.length) { const section = document.createElement("section"); const heading = document.createElement("h3"); heading.textContent = "Recommendations"; section.append(heading, ...displayedRecommendations.map(productCard)); box.append(section); }
   }
   $("select-products").classList.toggle("hidden", !selected.length);
+}
+
+function customerCartReasons(reasons = []) {
+  return reasons.map((reason) => {
+    if (reason.includes("exceeds mandate cap")) return "This cart exceeds your spending limit. Increase your mandate to continue.";
+    if (reason.includes("Insufficient stock")) return "Only the available stock can be added.";
+    if (reason.includes("restricted") || reason.includes("category is not allowed")) return "This product isn't permitted by the current mandate.";
+    return reason;
+  });
 }
 
 async function askAgent(event) {
@@ -99,11 +125,16 @@ async function askAgent(event) {
   const response = await fetch("/api/customer/chat", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({request: $("chat-request").value})});
   const result = await response.json();
   if (!response.ok) { $("chat-status").textContent = result.error || "The agent could not respond."; return; }
-  const catalogueResults = result.history.flatMap((entry) => entry.tool === "search_catalogue" && Array.isArray(entry.result) ? entry.result : []);
-  $("chat-status").textContent = catalogueResults.length ? (result.message || "I found these options for you.").split(/\n\s*\n/)[0] : (result.message || "The agent could not find matching products.");
+  agentHistory = result.history || [];
+  const searchResults = agentHistory.flatMap((entry) => entry.tool === "search_catalogue" && Array.isArray(entry.result) ? entry.result : []);
+  const catalogueResults = searchResults.flatMap((product) => [product, ...(product.recommendations || [])]);
+  $("chat-status").textContent = searchResults.length ? (result.message || "I found these options for you.").split(/\n\s*\n/)[0] : (result.message || "The agent could not find matching products.");
   requestedQuantities = extractRequestedQuantities($("chat-request").value);
-  products = [...new Map(catalogueResults.filter((product) => product && product.id).map((product) => [product.id, product])).values()];
-  selected = []; renderProducts();
+  displayedProducts = [...new Map(searchResults.filter((product) => product && product.id).map((product) => [product.id, product])).values()];
+  displayedRecommendations = [...new Map(catalogueResults.filter((product) => product && product.id && !displayedProducts.some(({id}) => id === product.id)).map((product) => [product.id, product])).values()];
+  renderCategoryPicker(mandate?.allowed_categories_json || [], displayedRecommendations.map(({category}) => category));
+  renderProducts();
+  renderAgentTrace();
   if (result.checkout?.intent_id) {
     const persisted = await loadIntent(result.checkout.intent_id);
     if (result.checkout.allowed !== false && persisted?.status === "PENDING" && !persisted.payment_id && persisted.checkout?.order_id) {
@@ -112,13 +143,29 @@ async function askAgent(event) {
   }
 }
 
+function renderAgentTrace(history = agentHistory, extra = []) {
+  const labels = {get_mandate: "Mandate checked", search_catalogue: "Catalogue searched", create_cart: "Cart validated", validate_purchase: "Cart validated", start_checkout: "Razorpay checkout created"};
+  const steps = history.filter((entry) => labels[entry.tool]).map((entry) => labels[entry.tool]);
+  if (history.some((entry) => entry.tool === "search_catalogue" && entry.result?.some?.((product) => product.recommendations?.length))) steps.push("Bundle opportunity found");
+  if (history.some((entry) => entry.tool === "search_catalogue")) steps.push("Product recommended");
+  steps.push(...extra);
+  $("agent-trace").replaceChildren(...[...new Set(steps)].map((label) => { const row = document.createElement("div"); const icon = document.createElement("span"); icon.textContent = "✓"; const body = document.createElement("div"); const title = document.createElement("strong"); title.textContent = label; const detail = document.createElement("small"); detail.textContent = "Recorded by the commerce flow."; body.append(title, detail); row.append(icon, body); return row; }));
+}
+
 async function reviewCart() {
   if (!selected.length || !mandate) return;
   const response = await fetch("/api/customer/cart", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
     mandate_id: mandate.id, items: selected.map(({id, quantity = 1}) => ({product_id: id, quantity})),
   })});
   cart = await response.json();
-  if (!response.ok) { $("chat-status").textContent = cart.error || "The requested quantity cannot be fulfilled."; return; }
+  if (!response.ok) {
+    const error = cart.error || "The requested item could not be added.";
+    const failedRecommendation = displayedRecommendations.find(({id}) => error.includes(id));
+    if (failedRecommendation) selected = selected.filter(({id}) => id !== failedRecommendation.id);
+    cart = undefined; renderProducts(); renderCart();
+    $("chat-status").textContent = error; renderAgentTrace(agentHistory, ["Item could not be added"]); return;
+  }
+  renderAgentTrace(agentHistory, ["Customer selection received", "Cart validated"]);
   nav("cart"); renderCart();
 }
 
@@ -127,14 +174,20 @@ function renderCart() {
   $("cart-empty").classList.toggle("hidden", hasCart);
   $("cart-items").replaceChildren(...(hasCart ? selected.map((product) => { const row = document.createElement("div"); row.className = "cart-row"; const name = document.createElement("span"); name.textContent = `${product.name} × ${product.quantity || 1}`; const price = document.createElement("strong"); price.textContent = money(product.price_paise * (product.quantity || 1)); row.append(name, price); return row; }) : []));
   const count = hasCart ? selected.reduce((total, product) => total + (product.quantity || 1), 0) : 0; $("cart-count").textContent = hasCart ? `(${count})` : ""; $("cart-count-label").textContent = hasCart ? `${count} item${count === 1 ? "" : "s"}` : ""; $("shop-cart-summary").textContent = hasCart ? `${count} · ${money(cart.cart_total_paise)}` : "";
-  if (!hasCart) return;
+  if (!hasCart) {
+    $("cart-total").textContent = "—"; $("cart-mandate").textContent = "—"; $("cart-status").textContent = "";
+    $("increase-mandate").hidden = true; $("increase-mandate").classList.add("hidden");
+    $("launch").hidden = true; $("launch").classList.add("hidden");
+    return;
+  }
   $("cart-total").textContent = money(cart.cart_total_paise); $("cart-mandate").textContent = money(cart.mandate_cap_paise);
-  $("cart-status").textContent = cart.allowed ? "Within your mandate. Checkout is ready." : (cart.reasons || []).join(" ");
+  const unresolvedPayment = activePayment.has(activePaymentStatus);
+  $("cart-status").textContent = unresolvedPayment ? "Payment is still being confirmed. Do not retry." : cart.allowed ? "Within your mandate. Checkout is ready." : customerCartReasons(cart.reasons).join(" ");
   const increase = $("increase-mandate");
   if (!cart.allowed && cart.cart_total_paise > cart.mandate_cap_paise) {
     const suggested = Math.ceil(cart.cart_total_paise / 10000) * 10000; increase.textContent = `Increase mandate to ${money(suggested)}`; increase.hidden = false; increase.classList.remove("hidden"); increase.onclick = increaseMandate;
   } else { increase.hidden = true; increase.classList.add("hidden"); }
-  $("launch").hidden = !cart.allowed; $("launch").classList.toggle("hidden", !cart.allowed); $("launch").onclick = createCheckout;
+  $("launch").hidden = !cart.allowed || unresolvedPayment; $("launch").classList.toggle("hidden", !cart.allowed || unresolvedPayment); $("launch").onclick = createCheckout;
 }
 
 async function increaseMandate() {
@@ -146,22 +199,31 @@ async function createCheckout() {
   const response = await fetch("/api/customer/checkout", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({cart_id: cart.cart_id, mandate_id: mandate.id, request_id: requestId()})});
   const result = await response.json();
   if (response.ok && result.intent_id) { await loadTransactions(null, false); showCheckoutReady(result); if (result.order_id) window.openRazorpayCheckout(result); }
-  else $("cart-status").textContent = (result.reasons || [result.message || "Checkout blocked."]).join(" ");
+  else { $("cart-status").textContent = customerCartReasons(result.reasons || [result.message || "Checkout blocked."]).join(" "); if ((result.reasons || []).some((reason) => reason.includes("unresolved"))) renderAgentTrace(agentHistory, ["Additional payment blocked"]); }
 }
 
 function showCheckoutReady(result) {
+  activePaymentStatus = "PENDING";
+  $("launch").hidden = true; $("launch").classList.add("hidden");
+  renderAgentTrace(agentHistory, ["Razorpay checkout created"]);
   $("intent-id").value = result.intent_id; $("payment-panel").classList.remove("hidden"); $("payment-title").textContent = "Checkout ready"; $("payment-copy").textContent = "Razorpay will open to complete your payment."; $("payment-alert").className = "alert pending"; $("checkout-step").textContent = "✓ Checkout"; $("submitted-step").textContent = "○ Payment submitted"; $("confirm-step").textContent = "○ Confirmation pending"; $("order-id").textContent = result.order_id || "—"; $("payment-id").textContent = "—";
 }
 
 function renderPayment(result) {
+  activePaymentStatus = result.status;
   const submitted = Boolean(result.payment_id);
+  const unresolved = activePayment.has(result.status);
+  if (result.status === "CAPTURED") renderAgentTrace(agentHistory, ["Original payment resolved"]);
+  else if (result.status === "PENDING" || result.status === "AMBIGUOUS") renderAgentTrace(agentHistory, ["Payment confirmation pending"]);
   if (finalPayment.has(result.status)) { clearInterval(poll); poll = undefined; }
-  $("payment-panel").classList.remove("hidden"); $("payment-title").textContent = result.status === "CAPTURED" ? "Payment confirmed" : submitted || result.status === "AMBIGUOUS" ? result.message || "Payment is being confirmed." : "Checkout ready";
-  $("payment-copy").textContent = result.status === "CAPTURED" ? "Your order is confirmed." : submitted || result.status === "AMBIGUOUS" ? "Your payment is being verified. Do not retry." : "Razorpay will open to complete your payment.";
+  $("payment-panel").classList.remove("hidden"); $("payment-title").textContent = result.status === "CAPTURED" ? "Payment confirmed" : unresolved || (submitted && !finalPayment.has(result.status)) ? result.message || "Payment is being confirmed." : result.message || "Payment failed; you may try again.";
+  $("payment-copy").textContent = result.status === "CAPTURED" ? "Your order is confirmed." : unresolved || (submitted && !finalPayment.has(result.status)) ? "Your payment is being verified. Do not retry." : result.status === "FAILED" ? "You may try checkout again." : "This payment is no longer available for checkout.";
   $("payment-alert").className = `alert ${result.status === "CAPTURED" ? "success" : finalPayment.has(result.status) ? "error" : "pending"}`;
   $("checkout-step").textContent = "✓ Checkout"; $("submitted-step").textContent = result.payment_id ? "✓ Payment submitted" : "○ Payment submitted"; $("confirm-step").textContent = result.status === "CAPTURED" ? "✓ Payment confirmed" : "○ Confirmation pending";
   $("order-id").textContent = result.order_id || "—"; $("payment-id").textContent = result.payment_id || "—";
   $("view-transaction").classList.toggle("hidden", result.status !== "CAPTURED");
+  if (unresolved || result.status === "CAPTURED") { $("launch").hidden = true; $("launch").classList.add("hidden"); }
+  if (result.status === "FAILED" && cart?.allowed) { $("launch").hidden = false; $("launch").classList.remove("hidden"); }
   $("view-transaction").onclick = () => { nav("transactions"); loadIntent(result.intent_id); };
   if (result.status === "PENDING" || result.status === "AMBIGUOUS") { clearInterval(poll); poll = setInterval(() => loadIntent(result.intent_id), 2000); }
 }
@@ -194,4 +256,6 @@ window.onRazorpayDismiss = (checkout) => { fetch("/checkout/client-cancel", {met
 $("mandate-form").onsubmit = saveMandate; $("chat-form").onsubmit = askAgent; $("select-products").onclick = reviewCart; $("open-cart").onclick = () => nav("cart"); $("edit-mandate").onclick = () => { nav("dashboard"); $("max-limit").focus(); };
 document.querySelectorAll(".customer-subnav button").forEach((button) => button.onclick = () => nav(button.dataset.view));
 document.addEventListener("click", (event) => { const picker = $("category-picker"); if (picker?.open && !picker.contains(event.target)) picker.open = false; });
-renderCategoryPicker(); loadMandate(); loadTransactions(); renderProducts();
+const demoNote = document.querySelector(".demo-boundary"); if (demoNote) { demoNote.textContent = "Demo environment · Single customer session"; document.body.append(demoNote); }
+const trace = $("agent-trace")?.closest(".agent-trace"); if (trace) $("shop-view").append(trace);
+renderCategoryPicker(); loadMandate(); loadCatalogue(); loadTransactions(); renderProducts();

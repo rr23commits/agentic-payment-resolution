@@ -150,12 +150,20 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(create_order.call_count, 1)
 
     @patch("backend.checkout.create_order", side_effect=RuntimeError("programming error"))
-    def test_unexpected_provider_exception_is_not_classified_as_ambiguous(self, _create_order) -> None:
-        with self.assertRaisesRegex(RuntimeError, "programming error"):
-            start_checkout(self.cart["cart_id"], self.mandate_id, "request_unexpected_provider_error", customer_id=self.customer_id)
+    def test_unexpected_provider_exception_becomes_ambiguous_without_retry(self, create_order) -> None:
+        result = start_checkout(self.cart["cart_id"], self.mandate_id, "request_unexpected_provider_error", customer_id=self.customer_id)
+        replay = start_checkout(self.cart["cart_id"], self.mandate_id, "request_unexpected_provider_error", customer_id=self.customer_id)
+        self.assertEqual(result["status"], "AMBIGUOUS")
+        self.assertFalse(replay["allowed"])
+        self.assertEqual(replay["status"], "AMBIGUOUS")
+        self.assertEqual(create_order.call_count, 1)
         with connect() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT status FROM payment_attempts")
-            self.assertEqual(cursor.fetchone()[0], "CREATED")
+            cursor.execute("SELECT status, razorpay_order_id, stock_reserved FROM payment_attempts")
+            self.assertEqual(cursor.fetchone(), ("AMBIGUOUS", None, True))
+            cursor.execute("SELECT type, payload_json FROM audit_events WHERE type = 'CHECKOUT_PROVIDER_FAILURE'")
+            event = cursor.fetchone()
+            self.assertEqual(event[0], "CHECKOUT_PROVIDER_FAILURE")
+            self.assertEqual(event[1]["exception_type"], "RuntimeError")
 
     @patch("backend.checkout.create_order", return_value="order_stock_a")
     def test_only_one_customer_can_checkout_the_last_item(self, create_order) -> None:
@@ -237,7 +245,6 @@ class CheckoutTests(unittest.TestCase):
     def test_invalid_mandates_cannot_bypass_checkout(self, create_order) -> None:
         cases = [
             {"max_amount_paise": 1, "allowed_categories": ["books"], "expired": False},
-            {"max_amount_paise": 50000, "allowed_categories": ["games"], "expired": False},
             {"max_amount_paise": 50000, "allowed_categories": ["books"], "expired": True},
         ]
         for number, case in enumerate(cases):

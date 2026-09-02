@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from backend.catalogue import MAX_CART_TOTAL_PAISE, _append_validation_audit, _validate_purchase
 from backend.db import connect
-from backend.razorpay import RazorpayError, create_order
+from backend.razorpay import create_order
 
 
 def start_checkout(
@@ -122,7 +122,7 @@ def start_checkout(
         total_paise = _cart_total(cursor, cart_id)
     try:
         order_id = create_order(total_paise, intent_id)
-    except RazorpayError:
+    except Exception as error:
         with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 "UPDATE payment_attempts SET status = 'AMBIGUOUS', resolution_reason = %s "
@@ -139,7 +139,10 @@ def start_checkout(
                     cursor,
                     intent_id=updated["intent_id"], attempt_id=attempt_id,
                     event_type="CHECKOUT_PROVIDER_FAILURE",
-                    payload={"reason": "Razorpay order creation outcome is unknown"},
+                    payload={
+                        "reason": "Razorpay order creation outcome is unknown",
+                        "exception_type": type(error).__name__,
+                    },
                 )
         return {
             "allowed": False, "intent_id": intent_id, "status": "AMBIGUOUS",

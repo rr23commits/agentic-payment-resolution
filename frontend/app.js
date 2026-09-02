@@ -297,6 +297,15 @@ async function readOperatorTransactions() {
   byId("operator-status").textContent = `${rows.length} transaction${rows.length === 1 ? "" : "s"} found.`;
 }
 
+async function loadMetrics() {
+  const token = byId("operator-token").value;
+  const response = await fetch("/api/operator/metrics", {headers: {"X-Operator-Token": token}});
+  if (!response.ok) return;
+  const metrics = await response.json();
+  const labels = {requests: "Requests", recommendations_accepted: "Recommendations accepted", carts: "Carts", checkout_conversion: "Checkout conversion", average_order_value_paise: "Average order value", cross_sell_attachment_rate: "Cross-sell attachment", captured_revenue_paise: "Captured revenue", duplicate_charges_prevented: "Duplicate charges prevented", ambiguous_payments_resolved: "Ambiguous payments resolved"};
+  byId("merchant-metrics").replaceChildren(...Object.entries(labels).map(([key, label]) => { const cell = document.createElement("div"); const name = document.createElement("span"); name.textContent = label; const value = document.createElement("strong"); value.textContent = key.endsWith("paise") ? money(metrics[key]) : key.endsWith("rate") || key === "checkout_conversion" ? `${(metrics[key] * 100).toFixed(1)}%` : metrics[key]; cell.append(name, value); return cell; }));
+}
+
 async function reconcile(attemptId, token) {
   const response = await fetch("/api/operator/reconcile", {method: "POST", headers: {"Content-Type": "application/json", "X-Operator-Token": token}, body: JSON.stringify({attempt_id: attemptId})});
   byId("operator-status").textContent = response.ok ? "Reconciliation completed." : "Reconciliation unavailable.";
@@ -309,5 +318,5 @@ if (byId("chat-form")) byId("chat-form").onsubmit = runChat;
 if (byId("mandate-form")) { byId("mandate-form").onsubmit = saveMandate; readMandate(); }
 if (byId("select-products")) byId("select-products").onclick = reviewProducts;
 if (byId("operator-form")) byId("operator-form").addEventListener("submit", (event) => { event.preventDefault(); readOperator(); });
-if (byId("operator-discovery")) byId("operator-discovery").addEventListener("submit", (event) => { event.preventDefault(); readOperatorTransactions(); });
+if (byId("operator-discovery")) byId("operator-discovery").addEventListener("submit", (event) => { event.preventDefault(); readOperatorTransactions(); loadMetrics(); });
 if (byId("transaction-history")) readTransactions();

@@ -8,6 +8,19 @@ CREATE TABLE IF NOT EXISTS products (
     restricted BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+-- Optional merchandising data stays separate so legacy product fixtures remain
+-- insert-compatible; price_paise remains the checkout authority.
+CREATE TABLE IF NOT EXISTS product_metadata (
+    product_id TEXT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+    list_price_paise BIGINT,
+    offer_label TEXT,
+    offer_eligibility TEXT,
+    offer_valid_until DATE,
+    savings_paise BIGINT NOT NULL DEFAULT 0,
+    related_product_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    recommendation_reason TEXT
+);
+
 CREATE TABLE IF NOT EXISTS mandates (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL,
