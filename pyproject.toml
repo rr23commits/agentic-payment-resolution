@@ -1,7 +1,7 @@
 [project]
-name = "agentic-checkout"
+name = "mandatecart"
 version = "0.0.1"
-description = "Agentic checkout with authoritative payment resolution"
+description = "MandateCart with authoritative payment resolution"
 requires-python = ">=3.11"
 dependencies = [
     "psycopg[binary]>=3.2,<4",

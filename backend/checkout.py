@@ -65,7 +65,7 @@ def start_checkout(
         cursor.execute(
             "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
             "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-            "WHERE ci.customer_id = %s AND pa.status IN ('CREATED', 'PENDING', 'AMBIGUOUS', 'ABANDONED')",
+            "WHERE ci.customer_id = %s AND pa.status IN ('CREATED', 'PENDING', 'AMBIGUOUS')",
             (customer_id,),
         )
         active_attempt = cursor.fetchone()
@@ -73,7 +73,7 @@ def start_checkout(
             cursor.execute(
                 "SELECT ci.id AS intent_id, pa.id AS attempt_id FROM checkout_intents ci "
                 "JOIN payment_attempts pa ON pa.intent_id = ci.id "
-                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status NOT IN ('FAILED')",
+                "WHERE ci.customer_id = %s AND ci.cart_id = %s AND pa.status NOT IN ('FAILED', 'ABANDONED')",
                 (customer_id, cart_id),
             )
             active_attempt = cursor.fetchone()

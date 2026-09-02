@@ -4,7 +4,7 @@ from psycopg.rows import dict_row
 
 from backend.checkout import _append_audit
 from backend.db import connect
-from backend.resolver import _client_evidence, _resolve_attempt
+from backend.resolver import _abandon_attempt, _client_evidence, _resolve_attempt
 
 
 WAITING_MESSAGE = "Payment is being confirmed"
@@ -35,7 +35,8 @@ def record_client_cancellation(intent_id: str, customer_id: str) -> dict:
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             "SELECT pa.id AS attempt_id, pa.intent_id, pa.status, pa.razorpay_payment_id, ci.customer_id, "
-            "EXISTS (SELECT 1 FROM audit_events ae WHERE ae.attempt_id = pa.id AND ae.type = 'CLIENT_REPORTED') AS client_reported "
+            "EXISTS (SELECT 1 FROM audit_events ae WHERE ae.attempt_id = pa.id AND ae.type = 'CLIENT_REPORTED') AS client_reported, "
+            "EXISTS (SELECT 1 FROM audit_events ae WHERE ae.attempt_id = pa.id AND ae.evidence_source = 'RAZORPAY_WEBHOOK') AS provider_reported "
             "FROM payment_attempts pa JOIN checkout_intents ci ON ci.id = pa.intent_id "
             "WHERE ci.id = %s FOR UPDATE OF pa",
             (intent_id,),
@@ -53,6 +54,8 @@ def record_client_cancellation(intent_id: str, customer_id: str) -> dict:
             evidence_source="CLIENT_REPORTED",
             payload={"reason": "Browser dismissed Razorpay checkout"},
         )
+        if not attempt["razorpay_payment_id"] and not attempt["client_reported"] and not attempt["provider_reported"]:
+            return {"accepted": True, **_abandon_attempt(cursor, attempt), "message": "Checkout expired; you may try again."}
     return {"accepted": True, "status": "PENDING", "message": "Payment is still being confirmed. Do not retry."}
 
 

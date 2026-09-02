@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "agentic-checkout"
+name = "mandatecart"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

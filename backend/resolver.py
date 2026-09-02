@@ -103,6 +103,11 @@ def reconcile_status(attempt_id: str) -> dict:
     else:
         payments = fetch_order_payments(attempt["razorpay_order_id"])
     with connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        if attempt["razorpay_order_id"]:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"order:{attempt['razorpay_order_id']}",),
+            )
         cursor.execute("SELECT * FROM payment_attempts WHERE id = %s FOR UPDATE", (attempt_id,))
         current = cursor.fetchone()
         cursor.execute("SELECT id FROM checkout_intents WHERE id = %s FOR UPDATE", (current["intent_id"],))
@@ -133,6 +138,27 @@ def reconcile_status(attempt_id: str) -> dict:
         return _resolve_attempt(cursor, attempt_id, evidence)
 
 
+def _abandon_attempt(cursor, attempt: dict) -> dict:
+    """Abandon a dismissal proven locally to precede payment initiation."""
+    attempt_id = attempt.get("id") or attempt["attempt_id"]
+    cursor.execute("SELECT cart_id FROM checkout_intents WHERE id = %s", (attempt["intent_id"],))
+    _release_cart_stock(cursor, cursor.fetchone()["cart_id"])
+    reason = "Checkout dismissed before payment initiation with no provider evidence"
+    cursor.execute(
+        "UPDATE payment_attempts SET status = 'ABANDONED', stock_reserved = FALSE, "
+        "last_authoritative_at = CURRENT_TIMESTAMP, resolution_reason = %s WHERE id = %s",
+        (reason, attempt_id),
+    )
+    cursor.execute("UPDATE checkout_intents SET status = 'ABANDONED' WHERE id = %s", (attempt["intent_id"],))
+    _append_audit(
+        cursor,
+        intent_id=attempt["intent_id"], attempt_id=attempt_id,
+        event_type="ATTEMPT_RESOLVED", evidence_source="RAZORPAY_RECONCILIATION",
+        payload={"status": "ABANDONED", "previous_status": "PENDING", "reason": reason, "observed_payment": False},
+    )
+    return {"attempt_id": attempt_id, "status": "ABANDONED", "observed": False, "idempotent": False}
+
+
 def _target_status(attempt: dict, evidence: dict) -> tuple[str | None, str]:
     source = evidence.get("source") if isinstance(evidence, dict) else None
     if evidence.get("_authority") is not _AUTHORITY:
@@ -156,7 +182,7 @@ def _allowed_transition(current: str, target: str) -> bool:
     if current in {"PENDING", "AMBIGUOUS"}:
         return target in FINAL_STATUSES | {"AMBIGUOUS"}
     if current == "ABANDONED":
-        return target in FINAL_STATUSES
+        return False
     return current == "CAPTURED" and target in {"REVERSED", "REFUNDED"}
 
 

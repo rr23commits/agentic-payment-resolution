@@ -346,24 +346,24 @@ class CheckoutTests(unittest.TestCase):
             )
             self.assertEqual(cursor.fetchone()[0], "pay_browser_1")
 
-    @patch("backend.checkout.create_order", return_value="order_dismissed")
-    def test_modal_cancellation_keeps_stock_reserved_and_blocks_new_checkout(self, create_order) -> None:
+    @patch("backend.checkout.create_order", side_effect=["order_dismissed", "order_after_dismissal"])
+    def test_modal_cancellation_before_payment_abandons_and_allows_new_checkout(self, create_order) -> None:
         first = start_checkout(self.cart["cart_id"], self.mandate_id, "request_abandoned", customer_id=self.customer_id)
         cancelled = record_client_cancellation(first["intent_id"], self.customer_id)
         self.assertTrue(cancelled["accepted"])
-        self.assertEqual(cancelled["status"], "PENDING")
+        self.assertEqual(cancelled["status"], "ABANDONED")
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT status, stock_reserved FROM payment_attempts WHERE intent_id = %s", (first["intent_id"],))
-            self.assertEqual(cursor.fetchone(), ("PENDING", True))
+            self.assertEqual(cursor.fetchone(), ("ABANDONED", False))
             cursor.execute("SELECT stock FROM products WHERE id = 'product_checkout'")
-            self.assertEqual(cursor.fetchone()[0], 2)
+            self.assertEqual(cursor.fetchone()[0], 3)
 
         retry = start_checkout(self.cart["cart_id"], self.mandate_id, "request_retry", customer_id=self.customer_id)
-        self.assertFalse(retry["allowed"])
-        self.assertEqual(create_order.call_count, 1)
+        self.assertTrue(retry["allowed"])
+        self.assertEqual(create_order.call_count, 2)
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT type FROM audit_events WHERE intent_id = %s ORDER BY sequence DESC LIMIT 1", (first["intent_id"],))
-            self.assertEqual(cursor.fetchone()[0], "CHECKOUT_BLOCKED")
+            self.assertEqual(cursor.fetchone()[0], "ATTEMPT_RESOLVED")
 
     @patch("backend.checkout.create_order", return_value="order_cancel_blocked")
     def test_cancellation_does_not_close_submitted_or_ambiguous_attempts(self, create_order) -> None:
@@ -383,6 +383,7 @@ class CheckoutTests(unittest.TestCase):
     def test_authorized_evidence_stays_pending_then_late_capture_resolves_same_attempt(self, create_order) -> None:
         checkout = start_checkout(self.cart["cart_id"], self.mandate_id, "request_late_capture", customer_id=self.customer_id)
         attempt_id = checkout["intent_id"]
+        record_client_payment_reference(attempt_id, self.customer_id, checkout["order_id"], "pay_authorized")
         record_client_cancellation(attempt_id, self.customer_id)
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (attempt_id,))
@@ -410,6 +411,7 @@ class CheckoutTests(unittest.TestCase):
     @patch("backend.checkout.create_order", side_effect=["order_failed", "order_retry"])
     def test_authoritative_failure_releases_stock_and_allows_new_checkout(self, create_order) -> None:
         first = start_checkout(self.cart["cart_id"], self.mandate_id, "request_failure", customer_id=self.customer_id)
+        record_client_payment_reference(first["intent_id"], self.customer_id, first["order_id"], "pay_failed")
         record_client_cancellation(first["intent_id"], self.customer_id)
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (first["intent_id"],))

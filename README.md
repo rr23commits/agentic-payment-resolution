@@ -1,4 +1,4 @@
-# Agentic Checkout with Authoritative Payment Resolution
+# MandateCart with Authoritative Payment Resolution
 
 An AI shopping assistant that turns a customer's natural-language request into a mandate-scoped cart and a safe Razorpay Test Mode checkout. The agent can search products, surface related recommendations and offers, and prepare the transaction; the server—not the model or browser—decides the payable amount and final payment state.
 

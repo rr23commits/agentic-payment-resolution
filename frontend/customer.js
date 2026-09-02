@@ -13,8 +13,8 @@ let activePaymentStatus;
 
 const money = (paise) => paise == null ? "—" : `₹${(paise / 100).toFixed(2)}`;
 const requestId = () => crypto.randomUUID();
-const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS", "ABANDONED"]);
-const finalPayment = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED"]);
+const activePayment = new Set(["CREATED", "PENDING", "AMBIGUOUS"]);
+const finalPayment = new Set(["CAPTURED", "FAILED", "REVERSED", "REFUNDED", "ABANDONED"]);
 const catalogueCategoryAliases = {tshirt: "tshirts", tshirts: "tshirts", pant: "pants", pants: "pants", book: "books", books: "books"};
 
 function extractRequestedQuantities(request) {
@@ -224,7 +224,7 @@ function renderPayment(result) {
   $("order-id").textContent = result.order_id || "—"; $("payment-id").textContent = result.payment_id || "—";
   $("view-transaction").classList.toggle("hidden", result.status !== "CAPTURED");
   if (unresolved || result.status === "CAPTURED") { $("launch").hidden = true; $("launch").classList.add("hidden"); }
-  if (result.status === "FAILED" && cart?.allowed) { $("launch").hidden = false; $("launch").classList.remove("hidden"); }
+  if (["FAILED", "ABANDONED"].includes(result.status) && cart?.allowed) { $("launch").hidden = false; $("launch").classList.remove("hidden"); }
   $("view-transaction").onclick = () => { nav("transactions"); loadIntent(result.intent_id); };
   if (result.status === "PENDING" || result.status === "AMBIGUOUS") { clearInterval(poll); poll = setInterval(() => loadIntent(result.intent_id), 2000); }
 }

@@ -11,10 +11,10 @@ from unittest.mock import patch
 from psycopg.types.json import Jsonb
 
 from backend.catalogue import create_cart, mandate_token
-from backend.browser_checkout import record_client_payment_reference, record_client_timeout
+from backend.browser_checkout import record_client_cancellation, record_client_payment_reference, record_client_timeout
 from backend.checkout import start_checkout
 from backend.db import connect, migrate
-from backend.resolver import _client_evidence, reconcile_status, resolve_attempt
+from backend.resolver import _client_evidence, _provider_evidence, reconcile_status, resolve_attempt
 from backend.views import operator_intent
 from backend.webhooks import ingest_webhook
 
@@ -261,3 +261,50 @@ class WebhookTests(unittest.TestCase):
                 (checkout["intent_id"],),
             )
             self.assertEqual(cursor.fetchall()[-1][0], "RECONCILIATION_CHECKED")
+
+    @patch("backend.checkout.create_order", return_value="order_dismissed_unpaid")
+    def test_dismissal_before_payment_immediately_abandons_and_releases_stock(self, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_dismissed_unpaid", customer_id="customer_webhook")
+        self.assertEqual(record_client_cancellation(checkout["intent_id"], "customer_webhook")["status"], "ABANDONED")
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT status, stock_reserved FROM payment_attempts")
+            self.assertEqual(cursor.fetchone(), ("ABANDONED", False))
+            cursor.execute("SELECT stock FROM products WHERE id = 'product_webhook'")
+            self.assertEqual(cursor.fetchone()[0], 1)
+
+    @patch("backend.checkout.create_order", side_effect=["order_dismissed_retry", "order_after_abandonment"])
+    def test_abandoned_attempt_allows_a_new_checkout_without_reconciliation(self, create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_abandon_then_retry", customer_id="customer_webhook")
+        self.assertEqual(record_client_cancellation(checkout["intent_id"], "customer_webhook")["status"], "ABANDONED")
+
+        retry = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_after_abandonment", customer_id="customer_webhook")
+        self.assertTrue(retry["allowed"])
+        self.assertEqual(create_order.call_count, 2)
+
+    @patch("backend.resolver.fetch_order_payments", return_value=[])
+    @patch("backend.checkout.create_order", return_value="order_dismissed_paid")
+    def test_provider_payment_before_dismissal_does_not_abandon(self, _create_order, _fetch_payments) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_dismissed_paid", customer_id="customer_webhook")
+        body, signature = self._event(checkout["order_id"])
+        self.assertTrue(ingest_webhook(body, signature, "event_before_dismissal")["matched"])
+        attempt_id = self._attempt_id(checkout["intent_id"])
+        self.assertEqual(reconcile_status(attempt_id)["status"], "CAPTURED")
+        self.assertFalse(record_client_cancellation(checkout["intent_id"], "customer_webhook")["accepted"])
+
+    @patch("backend.checkout.create_order", return_value="order_late_after_abandonment")
+    @patch("backend.resolver.fetch_order_payments", return_value=[])
+    def test_late_provider_evidence_cannot_resolve_abandoned_attempt(self, _fetch_payments, _create_order) -> None:
+        checkout = start_checkout(self.cart["cart_id"], "mandate_webhook", "request_late_after_abandonment", customer_id="customer_webhook")
+        self.assertEqual(record_client_cancellation(checkout["intent_id"], "customer_webhook")["status"], "ABANDONED")
+        attempt_id = self._attempt_id(checkout["intent_id"])
+        late = resolve_attempt(
+            attempt_id,
+            _provider_evidence("RAZORPAY_RECONCILIATION", order_id=checkout["order_id"], payment_id="pay_late", status="captured"),
+        )
+        self.assertTrue(late["reconciliation_required"])
+        self.assertEqual(late["status"], "ABANDONED")
+
+    def _attempt_id(self, intent_id: str) -> str:
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM payment_attempts WHERE intent_id = %s", (intent_id,))
+            return cursor.fetchone()[0]

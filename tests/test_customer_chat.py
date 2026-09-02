@@ -128,7 +128,7 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertIn('const unresolved = activePayment.has(result.status)', source)
         self.assertIn('Payment is still being confirmed. Do not retry.', source)
         self.assertIn('result.status === "FAILED" ? "You may try checkout again."', source)
-        self.assertIn('"ABANDONED"]', source)
+        self.assertIn('"REFUNDED", "ABANDONED"]', source)
         self.assertIn("if (result.checkout?.intent_id)", source)
         self.assertIn("const persisted = await loadIntent(result.checkout.intent_id)", source)
         self.assertIn('persisted?.status === "PENDING" && !persisted.payment_id', source)
