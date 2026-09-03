@@ -22,7 +22,7 @@ class AgentToolTests(unittest.TestCase):
         expires_at = datetime.now(timezone.utc) + timedelta(days=1)
         token = mandate_token(
             customer_id="customer_agent", merchant_id="merchant_demo", agent_id="agent_1",
-            max_amount_paise=50000, allowed_categories=["books"], expires_at=expires_at,
+            max_amount_paise=50000, allowed_categories=["books", "tshirts"], expires_at=expires_at,
         )
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("TRUNCATE webhook_events, audit_events, payment_attempts, checkout_intents, carts, mandates, products CASCADE")
@@ -32,7 +32,7 @@ class AgentToolTests(unittest.TestCase):
                 "('product_shirt', 'T-Shirt', 'Cotton shirt', 'tshirts', 30000, 1, FALSE), "
                 "('product_pants', 'Pants', 'Cotton pants', 'pants', 30000, 1, FALSE)"
             )
-            cursor.execute("INSERT INTO mandates VALUES ('mandate_agent', 'customer_agent', 'merchant_demo', 'agent_1', 50000, %s, %s, %s)", (Jsonb(["books"]), expires_at, token))
+            cursor.execute("INSERT INTO mandates VALUES ('mandate_agent', 'customer_agent', 'merchant_demo', 'agent_1', 50000, %s, %s, %s)", (Jsonb(["books", "tshirts"]), expires_at, token))
         self.tools = tools_for("customer_agent")
 
     @patch("backend.checkout.create_order", return_value="order_agent")
@@ -60,17 +60,23 @@ class AgentToolTests(unittest.TestCase):
         self.assertIn("Cart does not belong to this customer", result["reasons"])
 
     def test_out_of_category_product_is_allowed_within_spending_mandate(self) -> None:
-        cart = self.tools.create_cart([{"product_id": "product_pants", "quantity": 1}])
+        cart = self.tools.create_cart([{"product_id": "product_pants", "quantity": 1, "source": "recommendation"}])
         self.assertTrue(self.tools.validate_purchase(cart["cart_id"], "mandate_agent")["allowed"])
 
-    def test_search_and_details_are_mandate_scoped(self) -> None:
+    def test_search_is_scoped_to_things_i_want(self) -> None:
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("Book")], ["books"])
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("books")], ["books"])
         self.assertEqual([item["category"] for item in self.tools.search_catalogue("books", category="books")], ["books"])
-        self.assertEqual(self.tools.search_catalogue("Cotton", category="tshirts"), [])
-        self.assertIsNone(self.tools.get_product_details("product_shirt"))
+        self.assertEqual([item["id"] for item in self.tools.search_catalogue("Cotton", category="tshirts")], ["product_shirt"])
+        self.assertEqual(self.tools.search_catalogue("Cotton", category="pants"), [])
+        self.assertEqual(self.tools.get_product_details("product_shirt")["category"], "tshirts")
         self.assertEqual(get_product_details("product_shirt")["category"], "tshirts")
-        self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, set())
+        self.assertEqual({item["category"] for item in self.tools.search_catalogue("tshirt", category="tshirts")}, {"tshirts"})
+
+        self.assertEqual({item["category"] for item in self.tools.search_catalogue("Cotton")}, {"tshirts"})
+
+        cart = self.tools.create_cart([{"product_id": "product_pants", "quantity": 1}])
+        self.assertTrue(self.tools.validate_purchase(cart["cart_id"], "mandate_agent")["allowed"])
 
     def test_natural_tshirt_search_forms_use_the_allowed_category(self) -> None:
         from backend.catalogue import update_mandate
@@ -88,7 +94,75 @@ class AgentToolTests(unittest.TestCase):
         self.assertFalse(hasattr(self.tools, "update_mandate"))
         self.assertFalse(hasattr(self.tools, "increase_mandate"))
 
-    def test_mixed_request_returns_products_before_mandate_validation(self) -> None:
+    def test_agent_search_keeps_requested_categories_within_things_i_want(self) -> None:
+        cases = (
+            ("I want books", ["books"], {"product_agent"}),
+            ("I want pants", ["books"], set()),
+            ("I want books", ["books", "tshirts"], {"product_agent"}),
+            ("I want tshirts", ["books", "tshirts"], {"product_shirt"}),
+        )
+        for request, categories, expected_ids in cases:
+            with self.subTest(request=request, categories=categories):
+                update_mandate(
+                    "customer_agent", 50000, categories,
+                    datetime.now(timezone.utc) + timedelta(days=2), request_id=f"search-{request}-{','.join(categories)}",
+                )
+
+                def model(context):
+                    if not context["history"]:
+                        return {"tool": "search_catalogue", "arguments": {"query": request.split("I want ", 1)[1]}}
+                    return {"tool": "respond_to_customer", "arguments": {"message": "I found matching options."}}
+
+                result = run_agent(request, customer_id="customer_agent", model=model)
+                search = next(entry for entry in result["history"] if entry.get("tool") == "search_catalogue")
+                self.assertEqual({product["id"] for product in search["result"]}, expected_ids)
+
+    def test_mixed_explicit_request_uses_only_requested_categories(self) -> None:
+        update_mandate(
+            "customer_agent", 50000, ["books", "tshirts"],
+            datetime.now(timezone.utc) + timedelta(days=2), request_id="mixed-preference-search",
+        )
+
+        def model(context):
+            if len(context["history"]) == 0:
+                return {"tool": "search_catalogue", "arguments": {"query": "tshirts"}}
+            if len(context["history"]) == 1:
+                return {"tool": "search_catalogue", "arguments": {"query": "books"}}
+            return {"tool": "respond_to_customer", "arguments": {"message": "I found the requested options."}}
+
+        result = run_agent("I want 2 t-shirts and 3 books", customer_id="customer_agent", model=model)
+        searches = [entry["result"] for entry in result["history"] if entry.get("tool") == "search_catalogue"]
+        self.assertEqual({product["category"] for products in searches for product in products}, {"books", "tshirts"})
+
+    def test_mixed_request_excludes_categories_outside_things_i_want(self) -> None:
+        def model(context):
+            if not context["history"]:
+                return {"tool": "get_mandate", "arguments": {}}
+            if len(context["history"]) == 1:
+                return {"tool": "search_catalogue", "arguments": {"query": "pants", "category": "pants"}}
+            if len(context["history"]) == 2:
+                return {"tool": "search_catalogue", "arguments": {"query": "tshirts", "category": "tshirts"}}
+            if len(context["history"]) == 3:
+                return {"tool": "search_catalogue", "arguments": {"query": "books", "category": "books"}}
+            return {"tool": "respond_to_customer", "arguments": {"message": "I found matching options."}}
+
+        result = run_agent("I want pants, tshirt and books", customer_id="customer_agent", model=model)
+        products = [product for entry in result["history"] if entry.get("tool") == "search_catalogue" for product in entry["result"]]
+        self.assertEqual({product["category"] for product in products}, {"books", "tshirts"})
+
+    def test_default_search_returns_all_things_i_want_categories(self) -> None:
+        def model(context):
+            if not context["history"]:
+                return {"tool": "get_mandate", "arguments": {}}
+            if len(context["history"]) == 1:
+                return {"tool": "search_catalogue", "arguments": {"query": "something"}}
+            return {"tool": "respond_to_customer", "arguments": {"message": "I found matching options."}}
+
+        result = run_agent("I want something", customer_id="customer_agent", model=model)
+        products = [product for entry in result["history"] if entry.get("tool") == "search_catalogue" for product in entry["result"]]
+        self.assertEqual({product["category"] for product in products}, {"books", "tshirts"})
+
+    def test_mixed_request_excludes_unselected_categories(self) -> None:
         update_mandate(
             "customer_agent", 100000, ["tshirts", "pants"],
             datetime.now(timezone.utc) + timedelta(days=2), request_id="mixed-mandate",
@@ -104,12 +178,11 @@ class AgentToolTests(unittest.TestCase):
                 return {"tool": "search_catalogue", "arguments": {"query": "tshirts"}}
             if len(context["history"]) == 2:
                 return {"tool": "search_catalogue", "arguments": {"query": "Book", "category": "books"}}
-            return {"tool": "respond_to_customer", "arguments": {"message": "I found T-Shirt options. Books are outside your current mandate, so I left them out."}}
+            return {"tool": "respond_to_customer", "arguments": {"message": "I found T-Shirt options for you to review."}}
 
         result = run_agent("I want 2 tshirts and 3 books", customer_id="customer_agent", model=model)
         searches = [entry["result"] for entry in result["history"] if entry.get("tool") == "search_catalogue"]
         self.assertEqual({product["category"] for products in searches for product in products}, {"tshirts"})
         self.assertEqual([product["id"] for product in searches[0]], ["product_shirt"])
-        self.assertIn("Books", result["message"])
-        self.assertIn("outside", result["message"])
+        self.assertNotIn("book", result["message"])
         self.assertTrue(all(request == "I want 2 tshirts and 3 books" for request in seen_requests))

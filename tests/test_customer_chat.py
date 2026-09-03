@@ -177,6 +177,18 @@ class CustomerChatEndpointTests(unittest.TestCase):
         self.assertIn('window.onRazorpayDismiss(checkout)', checkout_source)
         self.assertIn('fetch("/checkout/client-cancel"', source)
 
+    def test_client_cancellation_is_keepalive_and_refreshes_persisted_state(self) -> None:
+        with open("frontend/customer.js", encoding="utf-8") as file:
+            customer_source = file.read()
+        self.assertIn('keepalive: true', customer_source)
+        self.assertIn('const result = await loadIntent(checkout.intent_id)', customer_source)
+        self.assertIn('result?.status === "ABANDONED" ? "Checkout cancelled. You may try again."', customer_source)
+        self.assertIn('Could not cancel checkout. Payment status remains protected; do not retry.', customer_source)
+
+        with open("frontend/checkout.js", encoding="utf-8") as file:
+            checkout_source = file.read()
+        self.assertIn('if (!submitted && typeof window.onRazorpayDismiss === "function")', checkout_source)
+
     def test_customer_quantity_parser_handles_supported_phrases(self) -> None:
         with open("frontend/customer.js", encoding="utf-8") as file:
             source = file.read()
