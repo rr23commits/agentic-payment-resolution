@@ -9,7 +9,7 @@ This Razorpay Buildathon project addresses a practical agentic-commerce problem:
 | Capability | Implemented behavior |
 | --- | --- |
 | Natural-language shopping | The agent interprets requests such as “I want two books” and searches the catalogue. Supported explicit quantities are preserved. |
-| Controlled AI actions | The model uses an allowlisted, customer-bound tool set. It cannot access credentials, the database, webhooks, reconciliation, or payment-state mutation directly. |
+| Controlled AI actions | The model uses an allowlisted, customer bound tool set. It cannot access credentials, the database, webhooks, reconciliation, or payment-state mutation directly. |
 | Spending authorization | A signed mandate binds customer, merchant, expiry, cap, and preferred categories. Categories guide discovery; server validation checks the actual purchase. |
 | Recommendations and offers | Related products carry recommendation attribution and a reason. Seeded offers expose list price, savings, eligibility, validity, and server-derived payable price. |
 | Agentic transaction | The agent can move from search to cart validation and checkout creation; product selection remains an explicit customer action. |
